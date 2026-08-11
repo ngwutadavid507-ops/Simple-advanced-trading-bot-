@@ -4,7 +4,7 @@ Kept separate from signal logic so indicators can be unit-tested / backtested in
 """
 
 import pandas as pd
-import pandas_ta as ta
+import pandas_ta_classic as ta
 import config
 
 
