@@ -1,6 +1,6 @@
 ccxt>=4.3.0
 pandas>=2.0.0
-pandas_ta>=0.3.14b0
+pandas-ta-classic>=0.6.8
 redis>=5.0.0
 requests>=2.31.0
 flask>=3.0.0
