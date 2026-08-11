@@ -179,7 +179,13 @@ def manage_open_position(exchange, position):
     )
 
 
-def main():
+def run_forever():
+    """
+    The actual bot loop, extracted so it can be run in a background thread
+    (see app.py) when hosted behind Render's free Web Service tier, which
+    requires something bound to a port - a plain script like this alone
+    won't satisfy Render's health check.
+    """
     exchange = exchange_client.get_exchange()
     print(f"[main] BTC Scalper starting. Demo mode: {config.USE_DEMO}")
     notifier.send_message(f"🤖 BTC Scalper started (demo={config.USE_DEMO}, leverage={config.LEVERAGE}x)")
@@ -196,4 +202,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    run_forever()
