@@ -13,17 +13,20 @@ won't be running to manage/close it. This is solved by pinging the '/'
 endpoint every few minutes from an external uptime service (see README) -
 this keeps the process alive continuously, not just during trading hours.
 
-Start command on Render should be: python3 app.py
+Start command on Render should be: python3 -u app.py
 (NOT python3 main.py - that has no web server and Render will fail the
-port-binding health check.)
+port-binding health check. The -u flag disables Python's output buffering
+so log lines show up immediately in Render's log viewer.)
 """
 
 import os
+import json
 import threading
 from datetime import datetime
 
 from flask import Flask
 import main as bot_main
+import config
 
 app = Flask(__name__)
 
@@ -39,6 +42,22 @@ def start_bot_thread():
     thread = threading.Thread(target=bot_main.run_forever, daemon=True)
     thread.start()
     print("[app] Bot thread started.")
+
+
+@app.route("/rejections")
+def recent_rejections():
+    """
+    Shows the last 30 signal evaluation log entries - lets us see WHY signals
+    are being taken or rejected, without needing server/SSH access. Visit
+    this in a browser at /rejections to check on the live evaluation log.
+    """
+    try:
+        with open(config.EVALUATION_LOG_PATH, "r") as f:
+            lines = f.readlines()[-30:]
+        entries = [json.loads(line) for line in lines]
+        return {"count": len(entries), "entries": entries}
+    except FileNotFoundError:
+        return {"count": 0, "entries": [], "note": "No log file yet"}
 
 
 @app.route("/")
