@@ -7,15 +7,17 @@ Design intent (per the agreed strategy):
 - Trend filter (4h/1h) + pullback entry (15m structure) + trigger confirmation (5m)
 - Every rejection is logged with a reason during EVALUATION_MODE, so the 3-5 day demo
   run produces real data on why signals were skipped, not just why they were taken.
+  Logged to Redis (via state_manager) rather than a local file, since Render's free
+  tier wipes local disk on every restart/redeploy.
 """
 
 import time
-import json
 from dataclasses import dataclass, asdict
 from typing import Optional
 
 import pandas as pd
 import config
+import state_manager
 from indicators import add_indicators, get_trend_direction
 
 
@@ -33,18 +35,14 @@ class Signal:
 
 
 def _log_evaluation(event: dict):
-    """Append every signal decision (taken or rejected) to the evaluation log."""
+    """Append every signal decision (taken or rejected) to the Redis evaluation log."""
     if not config.EVALUATION_MODE:
         return
-    event["logged_at"] = time.time()
     try:
-        with open(config.EVALUATION_LOG_PATH, "a") as f:
-            f.write(json.dumps(event) + "\n")
-    except FileNotFoundError:
-        import os
-        os.makedirs("logs", exist_ok=True)
-        with open(config.EVALUATION_LOG_PATH, "a") as f:
-            f.write(json.dumps(event) + "\n")
+        state_manager.log_evaluation_event(event)
+    except Exception as e:
+        # Never let logging failures break the actual trading logic
+        print(f"[signal_engine] Failed to log evaluation event: {e}")
 
 
 def evaluate_setup(
