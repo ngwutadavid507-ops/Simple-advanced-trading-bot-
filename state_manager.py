@@ -7,6 +7,8 @@ State tracked:
 - last_trade_close_time, last_trade_was_win (for cooldown)
 - open_position (so a restart doesn't lose track of a live trade)
 - day_wins, day_losses, day_pnl, summary_sent_for_day (for the daily Telegram summary)
+- evaluation_log (every signal decision, taken or rejected - survives restarts,
+  unlike Render's ephemeral filesystem which wipes local files on every redeploy)
 
 All keys are namespaced under config.REDIS_KEY_PREFIX to avoid collisions if this
 Redis instance is ever shared with another bot.
@@ -135,3 +137,23 @@ def get_open_position():
 def clear_open_position():
     r = get_client()
     r.delete(_key("open_position"))
+
+
+def log_evaluation_event(event: dict):
+    """
+    Appends a signal evaluation decision (taken or rejected) to a Redis list.
+    Kept in Redis instead of a local file because Render's free tier wipes
+    local disk on every restart/redeploy - Redis persists independently.
+    List is trimmed to the most recent 500 entries to avoid unbounded growth.
+    """
+    r = get_client()
+    event = dict(event)
+    event["logged_at"] = time.time()
+    r.rpush(_key("evaluation_log"), json.dumps(event))
+    r.ltrim(_key("evaluation_log"), -500, -1)
+
+
+def get_recent_evaluation_events(limit: int = 30):
+    r = get_client()
+    raw = r.lrange(_key("evaluation_log"), -limit, -1)
+    return [json.loads(x) for x in raw]
