@@ -17,16 +17,19 @@ Start command on Render should be: python3 -u app.py
 (NOT python3 main.py - that has no web server and Render will fail the
 port-binding health check. The -u flag disables Python's output buffering
 so log lines show up immediately in Render's log viewer.)
+
+Evaluation log data (/rejections) is read from Redis, not local disk -
+Render wipes local files on every restart/redeploy, but Redis persists
+independently via Upstash.
 """
 
 import os
-import json
 import threading
 from datetime import datetime
 
 from flask import Flask
 import main as bot_main
-import config
+import state_manager
 
 app = Flask(__name__)
 
@@ -48,16 +51,14 @@ def start_bot_thread():
 def recent_rejections():
     """
     Shows the last 30 signal evaluation log entries - lets us see WHY signals
-    are being taken or rejected, without needing server/SSH access. Visit
-    this in a browser at /rejections to check on the live evaluation log.
+    are being taken or rejected, without needing server/SSH access. Reads
+    from Redis, so this survives restarts unlike a local file would.
     """
     try:
-        with open(config.EVALUATION_LOG_PATH, "r") as f:
-            lines = f.readlines()[-30:]
-        entries = [json.loads(line) for line in lines]
+        entries = state_manager.get_recent_evaluation_events(limit=30)
         return {"count": len(entries), "entries": entries}
-    except FileNotFoundError:
-        return {"count": 0, "entries": [], "note": "No log file yet"}
+    except Exception as e:
+        return {"count": 0, "entries": [], "error": str(e)}
 
 
 @app.route("/")
