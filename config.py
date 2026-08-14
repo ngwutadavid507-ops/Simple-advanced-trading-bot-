@@ -83,6 +83,7 @@ VOLUME_MA_PERIOD = 20
 VOLUME_CONFIRMATION_MULTIPLIER = 1.2   # entry candle volume must exceed X * 20-period volume average
 
 MIN_RISK_REWARD_RATIO = 2.0        # target distance must be at least 2x the stop distance to qualify as a signal
+MIN_BTC_ORDER_SIZE = 0.001         # Bybit's minimum tradeable BTC perpetual amount
 
 # ============================================================
 # FEES (Bybit perpetual taker fee, adjust if your account tier differs)
