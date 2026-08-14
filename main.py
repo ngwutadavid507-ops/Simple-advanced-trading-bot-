@@ -7,6 +7,8 @@ Main loop. Order of operations on every cycle, deliberately in this sequence:
   4. Trading hours checked - no NEW entries outside 8am-8pm local time
   5. Only then: fetch data, evaluate signal
   6. If signal passes ALL of the above: size the position, place the trade
+     WITH stop-loss/take-profit attached directly on the entry order (fixed -
+     previously these were separate follow-up orders that silently failed to attach)
   7. Monitor open position until it closes, record the result, start cooldown
   8. Once per day, shortly after the trading window closes, send a Telegram summary
 
@@ -101,14 +103,15 @@ def run_cycle(exchange):
         return
 
     # --- 5. Size and place the trade ---
-    sizing = risk_manager.position_size(current_capital, signal.stop_distance_pct, config.LEVERAGE)
+    sizing = risk_manager.position_size(current_capital, signal.stop_distance_pct, config.LEVERAGE, signal.entry_price)
     if not sizing.approved:
         print(f"[main] Position sizing rejected: {sizing.reason}")
         return
 
     fee_estimate = risk_manager.estimate_fee_cost(sizing.notional_size)
     print(f"[main] Signal approved: {signal.reasoning}")
-    print(f"[main] Sizing: margin=${sizing.margin_to_use} notional=${sizing.notional_size} est_fees=${fee_estimate:.3f}")
+    print(f"[main] Sizing: margin=${sizing.margin_to_use} notional=${sizing.notional_size} "
+          f"amount={sizing.amount_in_base} BTC ({sizing.reason}) est_fees=${fee_estimate:.3f}")
 
     execute_trade(exchange, signal, sizing)
 
@@ -117,12 +120,14 @@ def execute_trade(exchange, signal, sizing):
     exchange_client.set_leverage(exchange, config.LEVERAGE)
 
     side = "buy" if signal.direction == "long" else "sell"
-    close_side = "sell" if signal.direction == "long" else "buy"
-    amount_in_base = round(sizing.notional_size / signal.entry_price, 6)
 
-    entry_order = exchange_client.place_market_order(exchange, side, amount_in_base)
-    exchange_client.place_stop_loss(exchange, close_side, amount_in_base, signal.stop_loss)
-    exchange_client.place_take_profit(exchange, close_side, amount_in_base, signal.take_profit_1)
+    entry_order = exchange_client.place_market_order_with_protection(
+        exchange,
+        side,
+        sizing.amount_in_base,
+        signal.stop_loss,
+        signal.take_profit_1,
+    )
 
     position = {
         "direction": signal.direction,
@@ -130,7 +135,7 @@ def execute_trade(exchange, signal, sizing):
         "stop_loss": signal.stop_loss,
         "take_profit_1": signal.take_profit_1,
         "take_profit_2": signal.take_profit_2,
-        "amount_in_base": amount_in_base,
+        "amount_in_base": sizing.amount_in_base,
         "margin_used": sizing.margin_to_use,
         "notional_size": sizing.notional_size,
         "entry_order_id": entry_order.get("id"),
