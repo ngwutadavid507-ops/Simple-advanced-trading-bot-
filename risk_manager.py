@@ -3,7 +3,8 @@ Risk management - the module that stands between a "good signal" and a live orde
 
 This is deliberately the most conservative-by-default file in the project. Every function
 here exists because of a specific failure mode discussed while designing this bot:
-  - position_size():        prevents one bad stop from wiping the account (Phoenix's core flaw)
+  - position_size():        prevents one bad stop from wiping the account (Phoenix's core flaw),
+                             AND enforces Bybit's minimum tradeable size safely
   - check_circuit_breakers(): prevents a bad DAY from wiping the account even with correct sizing
   - check_cooldown():        prevents revenge-trading / re-entering before the market has moved on
 
@@ -22,19 +23,28 @@ class PositionSizeResult:
     approved: bool
     margin_to_use: float
     notional_size: float
+    amount_in_base: float
     reason: str
 
 
-def position_size(current_capital: float, stop_distance_pct: float, leverage: int) -> PositionSizeResult:
+def position_size(current_capital: float, stop_distance_pct: float, leverage: int, entry_price: float) -> PositionSizeResult:
     """
     Calculates position size so that a stop-loss hit costs exactly RISK_PER_TRADE_PCT
     of current capital - regardless of how far away the stop needs to be.
 
     This REPLACES "use full capital every trade" - full capital is only used if the
     resulting risk is still within RISK_PER_TRADE_PCT given how tight the stop is.
+
+    Also enforces Bybit's minimum tradeable BTC amount (config.MIN_BTC_ORDER_SIZE):
+    - If the risk-based size comes out below the minimum, we check whether bumping
+      up to the minimum still fits within MAX_MARGIN_PCT_OF_CAPITAL. If yes, we bump
+      it (this means realized risk on this trade will be HIGHER than the 2% target,
+      but still capped and bounded - never full-account risk).
+    - If even the minimum order size would require more margin than allowed, the
+      trade is skipped entirely rather than erroring against the exchange.
     """
     if stop_distance_pct <= 0:
-        return PositionSizeResult(False, 0, 0, "invalid_stop_distance")
+        return PositionSizeResult(False, 0, 0, 0, "invalid_stop_distance")
 
     risk_amount = current_capital * config.RISK_PER_TRADE_PCT
 
@@ -55,8 +65,32 @@ def position_size(current_capital: float, stop_distance_pct: float, leverage: in
         reason = "sized_to_target_risk_pct"
 
     notional_size = margin_to_use * leverage
+    amount_in_base = notional_size / entry_price
 
-    return PositionSizeResult(True, round(margin_to_use, 2), round(notional_size, 2), reason)
+    # --- Enforce Bybit's minimum tradeable amount ---
+    if amount_in_base < config.MIN_BTC_ORDER_SIZE:
+        min_notional_needed = config.MIN_BTC_ORDER_SIZE * entry_price
+        min_margin_needed = min_notional_needed / leverage
+
+        if min_margin_needed <= max_margin:
+            # Safe to bump up to the minimum - still within our capital ceiling,
+            # though realized risk on this trade will now be above the 2% target.
+            margin_to_use = round(min_margin_needed, 2)
+            notional_size = round(min_notional_needed, 2)
+            amount_in_base = round(config.MIN_BTC_ORDER_SIZE, 6)
+            reason = "bumped_to_exchange_minimum_order_size"
+        else:
+            # Even the minimum order size would require too much margin - skip cleanly
+            # instead of sending an order the exchange will reject.
+            return PositionSizeResult(False, 0, 0, 0, "stop_too_tight_cannot_meet_exchange_minimum_safely")
+
+    return PositionSizeResult(
+        True,
+        round(margin_to_use, 2),
+        round(notional_size, 2),
+        round(amount_in_base, 6),
+        reason,
+    )
 
 
 @dataclass
