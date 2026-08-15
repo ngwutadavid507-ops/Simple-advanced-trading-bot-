@@ -9,6 +9,12 @@ agreed 3-5 day evaluation because it uses live market data.
 
 Setup note: generate demo trading API keys from Bybit's demo trading dashboard
 (separate from your real API keys) and set them as BYBIT_API_KEY / BYBIT_API_SECRET.
+
+IMPORTANT: stop-loss and take-profit are attached DIRECTLY on the entry order
+via Bybit's stopLoss/takeProfit params - NOT as separate follow-up orders. An
+earlier version tried placing them as separate market orders, which Bybit's API
+does not support the way that code assumed, and they were silently failing to
+attach, leaving live positions completely unprotected.
 """
 
 import ccxt
@@ -61,8 +67,13 @@ def set_leverage(exchange, leverage: int):
         print(f"[exchange] set_leverage note: {e}")
 
 
-def place_market_order(exchange, side: str, amount_in_base: float):
+def place_market_order_with_protection(exchange, side: str, amount_in_base: float, stop_loss: float, take_profit: float):
     """
+    Places the entry order WITH stop-loss and take-profit attached directly,
+    via Bybit's native stopLoss/takeProfit order params. This is the correct
+    way to guarantee protection is in place the instant the position opens -
+    not as a race-condition-prone follow-up order.
+
     side: 'buy' for long entry, 'sell' for short entry.
     amount_in_base: position size in BTC (notional_size / entry_price), not USDT.
     """
@@ -71,29 +82,12 @@ def place_market_order(exchange, side: str, amount_in_base: float):
         type="market",
         side=side,
         amount=amount_in_base,
-    )
-
-
-def place_stop_loss(exchange, side: str, amount_in_base: float, stop_price: float):
-    """side here is the CLOSING side - opposite of the entry side."""
-    return exchange.create_order(
-        symbol=config.SYMBOL,
-        type="market",
-        side=side,
-        amount=amount_in_base,
-        params={"stopLoss": stop_price, "reduceOnly": True},
-    )
-
-
-def place_take_profit(exchange, side: str, amount_in_base: float, tp_price: float):
-    """side here is the CLOSING side - opposite of the entry side."""
-    return exchange.create_order(
-        symbol=config.SYMBOL,
-        type="limit",
-        side=side,
-        amount=amount_in_base,
-        price=tp_price,
-        params={"reduceOnly": True},
+        params={
+            "stopLoss": str(stop_loss),
+            "takeProfit": str(take_profit),
+            "slTriggerBy": "LastPrice",
+            "tpTriggerBy": "LastPrice",
+        },
     )
 
 
