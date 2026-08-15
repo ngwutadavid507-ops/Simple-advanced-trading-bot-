@@ -138,3 +138,20 @@ def get_realized_pnl(exchange, position: dict) -> float:
 
     net_pnl = gross_pnl - total_fees - entry_fee_estimate
     return round(net_pnl, 4)
+
+
+def close_position_at_market(exchange, direction: str, amount_in_base: float):
+    """
+    Force-closes an open position at market price. Used for the max-hold-time
+    exit - if neither stop nor target has been hit within MAX_POSITION_HOLD_HOURS,
+    the trigger condition that justified entry has expired, so we exit cleanly
+    rather than continue holding an undefined, unplanned position.
+    """
+    close_side = "sell" if direction == "long" else "buy"
+    return exchange.create_order(
+        symbol=config.SYMBOL,
+        type="market",
+        side=close_side,
+        amount=amount_in_base,
+        params={"reduceOnly": True},
+    )
