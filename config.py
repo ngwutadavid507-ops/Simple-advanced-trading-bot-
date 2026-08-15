@@ -84,6 +84,9 @@ VOLUME_CONFIRMATION_MULTIPLIER = 1.2   # entry candle volume must exceed X * 20-
 
 MIN_RISK_REWARD_RATIO = 2.0        # target distance must be at least 2x the stop distance to qualify as a signal
 MIN_BTC_ORDER_SIZE = 0.001         # Bybit's minimum tradeable BTC perpetual amount
+MAX_POSITION_HOLD_HOURS = 3        # force-close a position if neither stop nor target hit within this window -
+                                    # the 5m/volume trigger that justified entry is time-bound; if the move
+                                    # hasn't happened by now, the original setup has effectively expired
 
 # ============================================================
 # FEES (Bybit perpetual taker fee, adjust if your account tier differs)
