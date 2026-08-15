@@ -7,9 +7,9 @@ Main loop. Order of operations on every cycle, deliberately in this sequence:
   4. Trading hours checked - no NEW entries outside 8am-8pm local time
   5. Only then: fetch data, evaluate signal
   6. If signal passes ALL of the above: size the position, place the trade
-     WITH stop-loss/take-profit attached directly on the entry order (fixed -
-     previously these were separate follow-up orders that silently failed to attach)
-  7. Monitor open position until it closes, record the result, start cooldown
+     WITH stop-loss/take-profit attached directly on the entry order
+  7. Monitor open position until it closes (stop/target hit OR max hold time
+     exceeded - see MAX_POSITION_HOLD_HOURS), record the result, start cooldown
   8. Once per day, shortly after the trading window closes, send a Telegram summary
 
 This ordering matters: risk controls are checked before signal quality, never after -
@@ -150,6 +150,10 @@ def manage_open_position(exchange, position):
     """
     Checks whether the open position has closed (stop or target hit) by checking
     current exchange position state. If closed, records the result and clears state.
+
+    Also enforces MAX_POSITION_HOLD_HOURS: if the position has been open too long
+    without hitting stop or target, the 5m/volume trigger that justified entry has
+    effectively expired - we force-close at market rather than hold indefinitely.
     """
     try:
         positions = exchange.fetch_positions([config.SYMBOL])
@@ -159,7 +163,19 @@ def manage_open_position(exchange, position):
         return
 
     if live_position is not None:
-        # Still open - nothing to do this cycle
+        # Still open on the exchange - check if it's been open too long
+        hours_open = (time.time() - position["opened_at"]) / 3600
+        if hours_open >= config.MAX_POSITION_HOLD_HOURS:
+            print(f"[main] Position open {hours_open:.1f}h, exceeds {config.MAX_POSITION_HOLD_HOURS}h limit - force closing.")
+            try:
+                exchange_client.close_position_at_market(exchange, position["direction"], position["amount_in_base"])
+                notifier.send_message(
+                    f"⏱️ Force-closing {position['direction'].upper()} BTC position - "
+                    f"open {hours_open:.1f}h with no stop/target hit (max hold time reached)."
+                )
+            except Exception as e:
+                print(f"[main] Error force-closing position: {e}")
+                notifier.send_message(f"⚠️ Failed to force-close stuck position: {e}")
         return
 
     # Position is closed on the exchange - pull real fill data to compute actual PnL
