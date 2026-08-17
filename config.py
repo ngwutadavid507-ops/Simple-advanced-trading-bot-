@@ -53,8 +53,8 @@ MAX_TRADES_PER_DAY = 10            # hard ceiling even though "unlimited" was th
 # Open positions are still monitored and can still close (stop/target hit) outside
 # this window - only new entries are blocked.
 TIMEZONE = "Africa/Lagos"          # UTC+1, no DST - matches your local time
-TRADING_START_HOUR = 8             # 8:00 AM local
-TRADING_END_HOUR = 20              # 8:00 PM local
+TRADING_START_HOUR = 0             # removed for evaluation phase - bot is unattended,
+TRADING_END_HOUR = 24              # gather signals across all hours to speed up data collection
 
 # ============================================================
 # TIMEFRAMES
