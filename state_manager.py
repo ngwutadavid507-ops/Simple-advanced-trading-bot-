@@ -5,10 +5,13 @@ State tracked:
 - day_start_capital / current trading day marker (resets daily counters)
 - trades_today, consecutive_losses
 - last_trade_close_time, last_trade_was_win (for cooldown)
-- open_position (so a restart doesn't lose track of a live trade)
+- open_position (so a restart doesn't lose track of a live trade) - now includes
+  which symbol/pair is currently open, since the bot scans multiple pairs
 - day_wins, day_losses, day_pnl, summary_sent_for_day (for the daily Telegram summary)
 - evaluation_log (every signal decision, taken or rejected - survives restarts,
   unlike Render's ephemeral filesystem which wipes local files on every redeploy)
+- cached_top_pairs (the top-volume pairs list, refreshed periodically rather than
+  re-fetched every single cycle - reduces API calls significantly)
 
 All keys are namespaced under config.REDIS_KEY_PREFIX to avoid collisions if this
 Redis instance is ever shared with another bot.
@@ -157,3 +160,29 @@ def get_recent_evaluation_events(limit: int = 30):
     r = get_client()
     raw = r.lrange(_key("evaluation_log"), -limit, -1)
     return [json.loads(x) for x in raw]
+
+
+def cache_top_pairs(pairs: list):
+    """Stores the freshly-fetched top-volume pairs list along with when it was fetched."""
+    r = get_client()
+    payload = {"pairs": pairs, "cached_at": time.time()}
+    r.set(_key("cached_top_pairs"), json.dumps(payload))
+
+
+def get_cached_top_pairs():
+    """
+    Returns (pairs, cached_at) if a cached list exists and is still fresh
+    (within config.PAIRS_REFRESH_HOURS), otherwise returns (None, None) so
+    the caller knows to fetch a fresh list.
+    """
+    r = get_client()
+    val = r.get(_key("cached_top_pairs"))
+    if not val:
+        return None, None
+
+    payload = json.loads(val)
+    age_hours = (time.time() - payload["cached_at"]) / 3600
+    if age_hours >= config.PAIRS_REFRESH_HOURS:
+        return None, None
+
+    return payload["pairs"], payload["cached_at"]
