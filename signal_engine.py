@@ -2,13 +2,11 @@
 Signal engine - the only place that decides "is this a good setup".
 
 Design intent (per the agreed strategy):
-- Trade BTC only, perpetual futures
-- Target small, high-probability moves (0.5-2% price move -> 5-10% ROI at 5-10x leverage)
+- Scan across the top-volume pairs (multi-pair, like Phoenix), not just BTC
+- Target small, high-probability moves (0.5-2% price move -> 5-10% ROI at 7x leverage)
 - Trend filter (4h/1h) + pullback entry (15m structure) + trigger confirmation (5m)
-- Every rejection is logged with a reason during EVALUATION_MODE, so the 3-5 day demo
-  run produces real data on why signals were skipped, not just why they were taken.
-  Logged to Redis (via state_manager) rather than a local file, since Render's free
-  tier wipes local disk on every restart/redeploy.
+- Every rejection is logged with a reason AND the symbol it applies to, so the
+  evaluation data shows which pairs are actually producing signals.
 """
 
 import time
@@ -41,7 +39,6 @@ def _log_evaluation(event: dict):
     try:
         state_manager.log_evaluation_event(event)
     except Exception as e:
-        # Never let logging failures break the actual trading logic
         print(f"[signal_engine] Failed to log evaluation event: {e}")
 
 
@@ -50,9 +47,12 @@ def evaluate_setup(
     df_1h: pd.DataFrame,
     df_15m: pd.DataFrame,
     df_5m: pd.DataFrame,
+    symbol: str,
 ) -> Optional[Signal]:
     """
-    Main entry point. Pass in raw OHLCV dataframes for each timeframe.
+    Main entry point. Pass in raw OHLCV dataframes for each timeframe, plus the
+    symbol they belong to (for logging purposes only - the logic itself is
+    symbol-agnostic).
     Returns a Signal if a valid setup exists, otherwise None (and logs why).
     """
     df_4h = add_indicators(df_4h)
@@ -62,51 +62,45 @@ def evaluate_setup(
 
     trend = get_trend_direction(df_4h, df_1h)
     if trend == "none":
-        _log_evaluation({"result": "rejected", "reason": "no_aligned_trend"})
+        _log_evaluation({"result": "rejected", "reason": "no_aligned_trend", "symbol": symbol})
         return None
 
     last_15m = df_15m.iloc[-1]
     last_5m = df_5m.iloc[-1]
     prev_5m = df_5m.iloc[-2]
 
-    # --- Pullback check on 15m structure ---
-    # For longs: price should have pulled back toward the 15m EMA20/50 zone, not be extended far above it
-    # For shorts: mirror logic
     if trend == "long":
-        pulled_back = last_15m["low"] <= last_15m["ema_fast"] * 1.003  # within ~0.3% of EMA20 or below it
+        pulled_back = last_15m["low"] <= last_15m["ema_fast"] * 1.003
     else:
         pulled_back = last_15m["high"] >= last_15m["ema_fast"] * 0.997
 
     if not pulled_back:
-        _log_evaluation({"result": "rejected", "reason": "price_extended_no_pullback", "trend": trend})
+        _log_evaluation({"result": "rejected", "reason": "price_extended_no_pullback", "trend": trend, "symbol": symbol})
         return None
 
-    # --- RSI healthy-zone check on 15m (avoid chasing extremes) ---
     if trend == "long":
         rsi_ok = config.RSI_PULLBACK_ZONE[0] <= last_15m["rsi"] <= 65
     else:
         rsi_ok = 35 <= last_15m["rsi"] <= (100 - config.RSI_PULLBACK_ZONE[0])
 
     if not rsi_ok:
-        _log_evaluation({"result": "rejected", "reason": "rsi_out_of_healthy_zone", "rsi": float(last_15m["rsi"])})
+        _log_evaluation({"result": "rejected", "reason": "rsi_out_of_healthy_zone", "rsi": float(last_15m["rsi"]), "symbol": symbol})
         return None
 
-    # --- 5m trigger candle: momentum shift in trend direction + volume confirmation ---
     if trend == "long":
         trigger_fired = (last_5m["close"] > prev_5m["high"]) and (last_5m["close"] > last_5m["ema_fast"])
     else:
         trigger_fired = (last_5m["close"] < prev_5m["low"]) and (last_5m["close"] < last_5m["ema_fast"])
 
     if not trigger_fired:
-        _log_evaluation({"result": "rejected", "reason": "no_5m_trigger", "trend": trend})
+        _log_evaluation({"result": "rejected", "reason": "no_5m_trigger", "trend": trend, "symbol": symbol})
         return None
 
     volume_confirmed = last_5m["volume"] > (last_5m["volume_ma"] * config.VOLUME_CONFIRMATION_MULTIPLIER)
     if not volume_confirmed:
-        _log_evaluation({"result": "rejected", "reason": "insufficient_volume_confirmation"})
+        _log_evaluation({"result": "rejected", "reason": "insufficient_volume_confirmation", "symbol": symbol})
         return None
 
-    # --- Build the trade: structure-based stop, ATR buffer, ROI-based targets ---
     entry_price = float(last_5m["close"])
     atr = float(last_15m["atr"])
 
@@ -131,11 +125,12 @@ def evaluate_setup(
             "result": "rejected",
             "reason": "risk_reward_below_minimum",
             "risk_reward": round(risk_reward, 2),
+            "symbol": symbol,
         })
         return None
 
     reasoning = (
-        f"{trend.upper()} | 4h/1h trend aligned | 15m pullback to EMA{config.EMA_FAST} "
+        f"{trend.upper()} {symbol} | 4h/1h trend aligned | 15m pullback to EMA{config.EMA_FAST} "
         f"with RSI {last_15m['rsi']:.1f} | 5m trigger break with "
         f"{last_5m['volume']/last_5m['volume_ma']:.2f}x avg volume | "
         f"R:R {risk_reward:.2f}"
@@ -153,5 +148,5 @@ def evaluate_setup(
         timestamp=time.time(),
     )
 
-    _log_evaluation({"result": "signal_taken", **asdict(signal)})
+    _log_evaluation({"result": "signal_taken", "symbol": symbol, **asdict(signal)})
     return signal
