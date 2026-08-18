@@ -9,7 +9,12 @@ import os
 # EXCHANGE
 # ============================================================
 EXCHANGE_ID = "bybit"
-SYMBOL = "BTC/USDT:USDT"          # Bybit perpetual swap symbol via ccxt
+# Multi-pair scanning (like Phoenix) - instead of one fixed symbol, the bot dynamically
+# pulls the top N pairs by 24h volume each day. High volume naturally filters out thin,
+# illiquid, or scam-adjacent tokens without needing a manual blocklist.
+TOP_PAIRS_COUNT = 40                # how many top-volume pairs to scan each cycle
+PAIRS_REFRESH_HOURS = 24            # how often to refresh the top-pairs list
+EXCLUDE_SYMBOL_MARKERS = ["UP/", "DOWN/", "BULL/", "BEAR/", "3L/", "3S/"]  # leveraged tokens - avoid, different risk profile
 USE_DEMO = True                    # Bybit has a real demo trading environment (not just testnet)
                                     # Flip to False only after the 5-day demo evaluation passes.
 
