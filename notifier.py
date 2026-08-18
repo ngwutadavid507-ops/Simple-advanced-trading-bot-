@@ -20,9 +20,9 @@ def send_message(text: str):
         print(f"[notifier] Telegram send failed: {e}")
 
 
-def notify_trade_entry(signal, margin_used, notional_size):
+def notify_trade_entry(signal, symbol, margin_used, notional_size):
     text = (
-        f"🎯 *Entry: {signal.direction.upper()} BTC*\n"
+        f"🎯 *Entry: {signal.direction.upper()} {symbol}*\n"
         f"Entry: `{signal.entry_price}`\n"
         f"Stop: `{signal.stop_loss}` ({signal.stop_distance_pct:.2%})\n"
         f"TP1: `{signal.take_profit_1}`  TP2: `{signal.take_profit_2}`\n"
@@ -34,10 +34,10 @@ def notify_trade_entry(signal, margin_used, notional_size):
     send_message(text)
 
 
-def notify_trade_close(direction, outcome, pnl_usdt, new_capital):
+def notify_trade_close(symbol, direction, outcome, pnl_usdt, new_capital):
     emoji = "✅" if outcome == "win" else "❌"
     text = (
-        f"{emoji} *Trade closed: {direction.upper()}*\n"
+        f"{emoji} *Trade closed: {direction.upper()} {symbol}*\n"
         f"Outcome: `{outcome}`\n"
         f"PnL: `${pnl_usdt:+.2f}`\n"
         f"Capital now: `${new_capital:.2f}`"
@@ -46,7 +46,7 @@ def notify_trade_close(direction, outcome, pnl_usdt, new_capital):
 
 
 def notify_circuit_breaker(reason):
-    send_message(f"🛑 *Trading halted for today*\nReason: `{reason}`")
+    send_message(f"🛑 *Trading halted*\nReason: `{reason}`")
 
 
 def notify_daily_summary(trades_today, wins, losses, day_pnl, ending_capital):
