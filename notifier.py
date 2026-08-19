@@ -1,4 +1,4 @@
-"""Telegram notifications - trade alerts, rejections (optional, verbose), daily summaries."""
+"""Telegram notifications - trade alerts, rejections (optional, verbose), daily/monthly summaries."""
 
 import requests
 import config
@@ -58,3 +58,46 @@ def notify_daily_summary(trades_today, wins, losses, day_pnl, ending_capital):
         f"Capital: `${ending_capital:.2f}`"
     )
     send_message(text)
+
+
+def notify_monthly_summary(month_label, trades, wins, losses, total_pnl, start_capital, end_capital):
+    """
+    Full end-of-month breakdown: every closed trade for the month, aggregate
+    win rate, total PnL, and PnL as a percentage of what capital started the
+    month at - the actual "what did we achieve" number.
+    """
+    win_rate = (wins / len(trades) * 100) if trades else 0
+    pnl_pct = (total_pnl / start_capital * 100) if start_capital > 0 else 0
+
+    lines = [
+        f"📅 *Monthly Summary — {month_label}*",
+        f"Total trades: `{len(trades)}`  W/L: `{wins}/{losses}`  Win rate: `{win_rate:.1f}%`",
+        f"Starting capital: `${start_capital:.2f}`",
+        f"Ending capital: `${end_capital:.2f}`",
+        f"Total PnL: `${total_pnl:+.2f}` (`{pnl_pct:+.2f}%`)",
+        "",
+        "*Trade log:*",
+    ]
+
+    for t in trades:
+        emoji = "✅" if t["was_win"] else "❌"
+        lines.append(f"{emoji} {t['symbol']} {t['direction'].upper()} — `${t['pnl']:+.2f}`")
+
+    text = "\n".join(lines)
+
+    # Telegram caps messages at 4096 characters - split into chunks if the trade
+    # log is long enough to exceed that.
+    if len(text) <= 4000:
+        send_message(text)
+    else:
+        header = "\n".join(lines[:7])
+        send_message(header)
+        trade_lines = lines[7:]
+        chunk = ""
+        for line in trade_lines:
+            if len(chunk) + len(line) + 1 > 4000:
+                send_message(chunk)
+                chunk = ""
+            chunk += line + "\n"
+        if chunk:
+            send_message(chunk)
