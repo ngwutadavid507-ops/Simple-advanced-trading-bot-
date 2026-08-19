@@ -5,8 +5,14 @@ Design intent (per the agreed strategy):
 - Scan across the top-volume pairs (multi-pair, like Phoenix), not just BTC
 - Target small, high-probability moves (0.5-2% price move -> 5-10% ROI at 7x leverage)
 - Trend filter (4h/1h) + pullback entry (15m structure) + trigger confirmation (5m)
-- Every rejection is logged with a reason AND the symbol it applies to, so the
-  evaluation data shows which pairs are actually producing signals.
+
+ENTRY TIMING FIX (after 7/7 trades force-closed with zero stop/target hits):
+The 5m trigger used to enter on the CLOSE of the breakout candle itself - this meant
+we were entering right as the move that created the volume spike was already finishing,
+not as it started. Now we require the breakout candle's move to HOLD through the next
+candle before entering - we enter on the confirmation candle's close, one candle later,
+only if price hasn't given back the breakout. This trades "catching the very start" for
+"confirming the move has real follow-through," which should reduce the flatline pattern.
 """
 
 import time
@@ -66,8 +72,6 @@ def evaluate_setup(
         return None
 
     last_15m = df_15m.iloc[-1]
-    last_5m = df_5m.iloc[-1]
-    prev_5m = df_5m.iloc[-2]
 
     if trend == "long":
         pulled_back = last_15m["low"] <= last_15m["ema_fast"] * 1.003
@@ -87,21 +91,46 @@ def evaluate_setup(
         _log_evaluation({"result": "rejected", "reason": "rsi_out_of_healthy_zone", "rsi": float(last_15m["rsi"]), "symbol": symbol})
         return None
 
-    if trend == "long":
-        trigger_fired = (last_5m["close"] > prev_5m["high"]) and (last_5m["close"] > last_5m["ema_fast"])
-    else:
-        trigger_fired = (last_5m["close"] < prev_5m["low"]) and (last_5m["close"] < last_5m["ema_fast"])
-
-    if not trigger_fired:
-        _log_evaluation({"result": "rejected", "reason": "no_5m_trigger", "trend": trend, "symbol": symbol})
+    # --- 5m trigger: breakout candle + HOLD confirmation on the following candle ---
+    # breakout_candle = the candle that broke structure with volume (the old trigger)
+    # confirm_candle = the NEXT candle - we only enter if price held above the breakout,
+    #                  and we enter at THIS candle's close, not the breakout candle's close
+    if len(df_5m) < 3:
+        _log_evaluation({"result": "rejected", "reason": "insufficient_5m_history", "symbol": symbol})
         return None
 
-    volume_confirmed = last_5m["volume"] > (last_5m["volume_ma"] * config.VOLUME_CONFIRMATION_MULTIPLIER)
-    if not volume_confirmed:
+    prior_candle = df_5m.iloc[-3]
+    breakout_candle = df_5m.iloc[-2]
+    confirm_candle = df_5m.iloc[-1]
+
+    if trend == "long":
+        breakout_fired = (breakout_candle["close"] > prior_candle["high"]) and (breakout_candle["close"] > breakout_candle["ema_fast"])
+    else:
+        breakout_fired = (breakout_candle["close"] < prior_candle["low"]) and (breakout_candle["close"] < breakout_candle["ema_fast"])
+
+    if not breakout_fired:
+        _log_evaluation({"result": "rejected", "reason": "no_5m_breakout", "trend": trend, "symbol": symbol})
+        return None
+
+    breakout_volume_confirmed = breakout_candle["volume"] > (breakout_candle["volume_ma"] * config.VOLUME_CONFIRMATION_MULTIPLIER)
+    if not breakout_volume_confirmed:
         _log_evaluation({"result": "rejected", "reason": "insufficient_volume_confirmation", "symbol": symbol})
         return None
 
-    entry_price = float(last_5m["close"])
+    # --- Hold confirmation: did the move survive the next candle, or did it snap back? ---
+    if trend == "long":
+        hold_confirmed = confirm_candle["low"] >= breakout_candle["low"] * 0.999
+        still_bullish = confirm_candle["close"] > confirm_candle["ema_fast"]
+    else:
+        hold_confirmed = confirm_candle["high"] <= breakout_candle["high"] * 1.001
+        still_bullish = confirm_candle["close"] < confirm_candle["ema_fast"]
+
+    if not (hold_confirmed and still_bullish):
+        _log_evaluation({"result": "rejected", "reason": "breakout_did_not_hold", "trend": trend, "symbol": symbol})
+        return None
+
+    # --- Build the trade: entry is the CONFIRMATION candle's close, not the breakout candle's ---
+    entry_price = float(confirm_candle["close"])
     atr = float(last_15m["atr"])
 
     if trend == "long":
@@ -131,8 +160,8 @@ def evaluate_setup(
 
     reasoning = (
         f"{trend.upper()} {symbol} | 4h/1h trend aligned | 15m pullback to EMA{config.EMA_FAST} "
-        f"with RSI {last_15m['rsi']:.1f} | 5m trigger break with "
-        f"{last_5m['volume']/last_5m['volume_ma']:.2f}x avg volume | "
+        f"with RSI {last_15m['rsi']:.1f} | 5m breakout+hold confirmed with "
+        f"{breakout_candle['volume']/breakout_candle['volume_ma']:.2f}x avg volume | "
         f"R:R {risk_reward:.2f}"
     )
 
