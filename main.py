@@ -9,19 +9,22 @@ Main loop. Order of operations on every cycle, deliberately in this sequence:
   5. If a signal passes ALL of the above: size the position, place the trade
      WITH stop-loss/take-profit attached directly on the entry order
   6. Monitor the open position (on its specific symbol) until it closes (stop/target
-     hit OR max hold time exceeded), record the result, start cooldown
-  7. Once per day, send a Telegram summary
+     hit OR max hold time exceeded), record the result, log it to permanent monthly
+     history, start cooldown
+  7. Daily Telegram summary once per day
+  8. Monthly Telegram summary automatically on the 1st cycle of a new month -
+     compiles every trade from the completed month into one report
 
 MULTI-PAIR: while a position is open, the bot does NOT scan other pairs for new
-entries (one trade at a time, as agreed) - but it resumes scanning the full list
-again as soon as it's flat, so it's never "stuck" watching only one pair.
+entries (one trade at a time) - but resumes scanning the full list once flat.
 
-Trading hours restriction has been removed - the bot is unattended and automated,
-so it evaluates signals across all pairs, around the clock.
+Trading hours restriction removed - the bot is unattended and automated, so it
+evaluates signals across all pairs, around the clock.
 """
 
 import time
 import traceback
+from datetime import datetime, timezone
 
 import config
 import exchange_client
@@ -51,11 +54,7 @@ def get_pairs_to_scan(exchange) -> list:
 
 
 def maybe_send_daily_summary(current_capital):
-    """
-    Sends the daily summary once per UTC day. Runs regardless of whether a
-    position is open, so the summary still fires even if the day happened
-    to end mid-trade.
-    """
+    """Sends the daily summary once per UTC day."""
     if not state_manager.summary_already_sent_today():
         stats = state_manager.get_day_stats()
         trades_today = state_manager.get_trades_today()
@@ -63,10 +62,41 @@ def maybe_send_daily_summary(current_capital):
         state_manager.mark_summary_sent()
 
 
+def maybe_send_monthly_summary(current_capital):
+    """
+    Detects a UTC month rollover and, exactly once, compiles the just-completed
+    month's full trade history into a Telegram summary. Also sets up tracking
+    for the new month (marker + starting capital).
+    """
+    now_month = datetime.now(timezone.utc).strftime("%Y-%m")
+    stored_month = state_manager.get_current_month_marker()
+
+    if stored_month is None:
+        # First run ever - just establish the current month, nothing to summarize yet.
+        state_manager.set_current_month_marker(now_month)
+        state_manager.set_month_start_capital(current_capital)
+        return
+
+    if stored_month != now_month:
+        # Month has rolled over - summarize the COMPLETED month (stored_month), not the new one.
+        trades = state_manager.get_trades_for_month(stored_month)
+        wins = sum(1 for t in trades if t["was_win"])
+        losses = sum(1 for t in trades if not t["was_win"])
+        total_pnl = sum(t["pnl"] for t in trades)
+        start_capital = state_manager.get_month_start_capital()
+
+        notifier.notify_monthly_summary(stored_month, trades, wins, losses, total_pnl, start_capital, current_capital)
+
+        # Set up fresh tracking for the new month
+        state_manager.set_current_month_marker(now_month)
+        state_manager.set_month_start_capital(current_capital)
+
+
 def run_cycle(exchange):
     current_capital = exchange_client.get_available_capital(exchange)
     state_manager.ensure_daily_reset(current_capital)
     maybe_send_daily_summary(current_capital)
+    maybe_send_monthly_summary(current_capital)
 
     open_position = state_manager.get_open_position()
     if open_position:
@@ -121,7 +151,7 @@ def run_cycle(exchange):
               f"amount={sizing.amount_in_base} ({sizing.reason}) est_fees=${fee_estimate:.3f}")
 
         execute_trade(exchange, symbol, signal, sizing)
-        return  # one trade per cycle - stop scanning once we've entered
+        return
 
     print(f"[main] No qualifying signal this cycle across {len(pairs)} pairs scanned.")
 
@@ -163,8 +193,8 @@ def manage_open_position(exchange, position):
     Checks whether the open position has closed (stop or target hit) by checking
     current exchange position state, on the position's specific symbol.
 
-    Also enforces MAX_POSITION_HOLD_HOURS: if the position has been open too long
-    without hitting stop or target, force-close at market rather than hold indefinitely.
+    Also enforces MAX_POSITION_HOLD_HOURS: force-closes if held too long without
+    hitting stop or target.
     """
     symbol = position["symbol"]
 
@@ -200,6 +230,13 @@ def manage_open_position(exchange, position):
     was_win = pnl > 0
 
     state_manager.record_trade_result(was_win, pnl)
+    state_manager.log_trade_history({
+        "symbol": symbol,
+        "direction": position["direction"],
+        "was_win": was_win,
+        "pnl": pnl,
+        "closed_at": time.time(),
+    })
     state_manager.clear_open_position()
     notifier.notify_trade_close(
         symbol,
