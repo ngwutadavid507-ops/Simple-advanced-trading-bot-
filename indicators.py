@@ -37,14 +37,20 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 def get_trend_direction(df_high_tf: pd.DataFrame, df_mid_tf: pd.DataFrame) -> str:
     """
     Determines macro trend direction using 4h + 1h EMA alignment.
-    Returns 'long', 'short', or 'none' (no clear/aligned trend).
-
-    Logic: price must be above (below) both EMA50 and EMA200 on the 4h chart,
-    AND EMA20 must be above (below) EMA50 on the 1h chart to confirm the
-    lower-timeframe momentum hasn't diverged from the macro trend yet.
+    Returns 'long', 'short', or 'none' (no clear/aligned trend, OR insufficient
+    history to calculate the 200-period EMA yet - some newer-listed pairs in the
+    multi-pair scan won't have 200 candles of 4h history, which previously crashed
+    the whole cycle instead of just skipping that one pair).
     """
     last_high = df_high_tf.iloc[-1]
     last_mid = df_mid_tf.iloc[-1]
+
+    required_values = [
+        last_high["close"], last_high["ema_slow"], last_high["ema_macro"],
+        last_mid["ema_fast"], last_mid["ema_slow"],
+    ]
+    if any(pd.isna(v) for v in required_values):
+        return "none"
 
     macro_uptrend = last_high["close"] > last_high["ema_slow"] > last_high["ema_macro"]
     macro_downtrend = last_high["close"] < last_high["ema_slow"] < last_high["ema_macro"]
