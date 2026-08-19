@@ -5,13 +5,14 @@ State tracked:
 - day_start_capital / current trading day marker (resets daily counters)
 - trades_today, consecutive_losses
 - last_trade_close_time, last_trade_was_win (for cooldown)
-- open_position (so a restart doesn't lose track of a live trade) - now includes
-  which symbol/pair is currently open, since the bot scans multiple pairs
-- day_wins, day_losses, day_pnl, summary_sent_for_day (for the daily Telegram summary)
-- evaluation_log (every signal decision, taken or rejected - survives restarts,
-  unlike Render's ephemeral filesystem which wipes local files on every redeploy)
-- cached_top_pairs (the top-volume pairs list, refreshed periodically rather than
-  re-fetched every single cycle - reduces API calls significantly)
+- open_position (so a restart doesn't lose track of a live trade) - includes symbol
+- day_wins, day_losses, day_pnl, summary_sent_for_day (daily Telegram summary)
+- evaluation_log (every signal decision, taken or rejected)
+- cached_top_pairs (the top-volume pairs list, refreshed periodically)
+- trade_history:{YYYY-MM} (every closed trade, permanently, bucketed by month -
+  this is what powers the automatic end-of-month summary)
+- current_month / month_start_capital (tracks month rollover to trigger the
+  monthly summary exactly once, automatically, on the 1st cycle of a new month)
 
 All keys are namespaced under config.REDIS_KEY_PREFIX to avoid collisions if this
 Redis instance is ever shared with another bot.
@@ -40,6 +41,10 @@ def _key(name: str) -> str:
 
 def _today_str() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _current_month_str() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m")
 
 
 def ensure_daily_reset(current_capital: float):
@@ -145,9 +150,8 @@ def clear_open_position():
 def log_evaluation_event(event: dict):
     """
     Appends a signal evaluation decision (taken or rejected) to a Redis list.
-    Kept in Redis instead of a local file because Render's free tier wipes
-    local disk on every restart/redeploy - Redis persists independently.
-    List is trimmed to the most recent 500 entries to avoid unbounded growth.
+    Trimmed to the most recent 500 entries - this is for debugging signal
+    quality, not permanent record-keeping (that's trade_history, below).
     """
     r = get_client()
     event = dict(event)
@@ -172,8 +176,7 @@ def cache_top_pairs(pairs: list):
 def get_cached_top_pairs():
     """
     Returns (pairs, cached_at) if a cached list exists and is still fresh
-    (within config.PAIRS_REFRESH_HOURS), otherwise returns (None, None) so
-    the caller knows to fetch a fresh list.
+    (within config.PAIRS_REFRESH_HOURS), otherwise returns (None, None).
     """
     r = get_client()
     val = r.get(_key("cached_top_pairs"))
@@ -186,3 +189,41 @@ def get_cached_top_pairs():
         return None, None
 
     return payload["pairs"], payload["cached_at"]
+
+
+def log_trade_history(entry: dict):
+    """
+    Permanently logs a closed trade (symbol, direction, pnl, was_win, closed_at)
+    to a monthly-bucketed Redis list - never trimmed, never reset. This is the
+    full record the automatic end-of-month summary reads from.
+    """
+    r = get_client()
+    month_key = _current_month_str()
+    r.rpush(_key(f"trade_history:{month_key}"), json.dumps(entry))
+
+
+def get_trades_for_month(month_str: str) -> list:
+    r = get_client()
+    raw = r.lrange(_key(f"trade_history:{month_str}"), 0, -1)
+    return [json.loads(x) for x in raw]
+
+
+def get_current_month_marker():
+    r = get_client()
+    return r.get(_key("current_month"))
+
+
+def set_current_month_marker(month_str: str):
+    r = get_client()
+    r.set(_key("current_month"), month_str)
+
+
+def get_month_start_capital() -> float:
+    r = get_client()
+    val = r.get(_key("month_start_capital"))
+    return float(val) if val else 0.0
+
+
+def set_month_start_capital(capital: float):
+    r = get_client()
+    r.set(_key("month_start_capital"), capital)
