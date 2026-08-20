@@ -6,13 +6,21 @@ Design intent (per the agreed strategy):
 - Target small, high-probability moves (0.5-2% price move -> 5-10% ROI at 7x leverage)
 - Trend filter (4h/1h) + pullback entry (15m structure) + trigger confirmation (5m)
 
-ENTRY TIMING FIX (after 7/7 trades force-closed with zero stop/target hits):
-The 5m trigger used to enter on the CLOSE of the breakout candle itself - this meant
-we were entering right as the move that created the volume spike was already finishing,
-not as it started. Now we require the breakout candle's move to HOLD through the next
-candle before entering - we enter on the confirmation candle's close, one candle later,
-only if price hasn't given back the breakout. This trades "catching the very start" for
-"confirming the move has real follow-through," which should reduce the flatline pattern.
+VOLATILITY-ADAPTIVE THRESHOLDS: pullback tolerance and hold-confirmation tolerance
+now scale with each pair's own ATR, instead of using fixed percentages. Fixed
+percentages structurally favored smooth, low-volatility assets (like XAUT) over
+genuinely volatile crypto pairs - a fixed 0.3% pullback zone is trivial for a calm
+asset to satisfy but can be blown through entirely by a volatile coin's normal
+noise, or never revisited at all. Scaling by ATR means a volatile pair gets a
+proportionally wider tolerance that matches its real movement, and a calm pair
+gets a tighter one - the filter adapts per-asset instead of applying one-size-fits-all
+thresholds calibrated for "average" volatility to everything.
+
+ENTRY TIMING: the 5m trigger requires a breakout candle (with volume confirmation)
+followed by a HOLD confirmation candle - we enter on the confirmation candle's
+close, one candle after the breakout, only if price hasn't given back more than
+HOLD_ATR_MULTIPLIER worth of ATR. This targets the late-entry/flatline pattern
+seen when entering on the breakout candle itself.
 """
 
 import time
@@ -57,8 +65,7 @@ def evaluate_setup(
 ) -> Optional[Signal]:
     """
     Main entry point. Pass in raw OHLCV dataframes for each timeframe, plus the
-    symbol they belong to (for logging purposes only - the logic itself is
-    symbol-agnostic).
+    symbol they belong to.
     Returns a Signal if a valid setup exists, otherwise None (and logs why).
     """
     df_4h = add_indicators(df_4h)
@@ -73,10 +80,16 @@ def evaluate_setup(
 
     last_15m = df_15m.iloc[-1]
 
+    if pd.isna(last_15m["atr"]) or pd.isna(last_15m["ema_fast"]):
+        _log_evaluation({"result": "rejected", "reason": "insufficient_15m_history", "symbol": symbol})
+        return None
+
+    pullback_tolerance = last_15m["atr"] * config.PULLBACK_ATR_MULTIPLIER
+
     if trend == "long":
-        pulled_back = last_15m["low"] <= last_15m["ema_fast"] * 1.003
+        pulled_back = last_15m["low"] <= last_15m["ema_fast"] + pullback_tolerance
     else:
-        pulled_back = last_15m["high"] >= last_15m["ema_fast"] * 0.997
+        pulled_back = last_15m["high"] >= last_15m["ema_fast"] - pullback_tolerance
 
     if not pulled_back:
         _log_evaluation({"result": "rejected", "reason": "price_extended_no_pullback", "trend": trend, "symbol": symbol})
@@ -91,10 +104,7 @@ def evaluate_setup(
         _log_evaluation({"result": "rejected", "reason": "rsi_out_of_healthy_zone", "rsi": float(last_15m["rsi"]), "symbol": symbol})
         return None
 
-    # --- 5m trigger: breakout candle + HOLD confirmation on the following candle ---
-    # breakout_candle = the candle that broke structure with volume (the old trigger)
-    # confirm_candle = the NEXT candle - we only enter if price held above the breakout,
-    #                  and we enter at THIS candle's close, not the breakout candle's close
+    # --- 5m trigger: breakout candle + ATR-scaled HOLD confirmation on the following candle ---
     if len(df_5m) < 3:
         _log_evaluation({"result": "rejected", "reason": "insufficient_5m_history", "symbol": symbol})
         return None
@@ -102,6 +112,10 @@ def evaluate_setup(
     prior_candle = df_5m.iloc[-3]
     breakout_candle = df_5m.iloc[-2]
     confirm_candle = df_5m.iloc[-1]
+
+    if pd.isna(breakout_candle["atr"]) or pd.isna(breakout_candle["ema_fast"]):
+        _log_evaluation({"result": "rejected", "reason": "insufficient_5m_atr_history", "symbol": symbol})
+        return None
 
     if trend == "long":
         breakout_fired = (breakout_candle["close"] > prior_candle["high"]) and (breakout_candle["close"] > breakout_candle["ema_fast"])
@@ -117,65 +131,26 @@ def evaluate_setup(
         _log_evaluation({"result": "rejected", "reason": "insufficient_volume_confirmation", "symbol": symbol})
         return None
 
-    # --- Hold confirmation: did the move survive the next candle, or did it snap back? ---
+    # --- Hold confirmation: did the move survive the next candle, within ATR-scaled tolerance? ---
+    hold_tolerance = breakout_candle["atr"] * config.HOLD_ATR_MULTIPLIER
+
     if trend == "long":
-        hold_confirmed = confirm_candle["low"] >= breakout_candle["low"] * 0.999
+        hold_confirmed = confirm_candle["low"] >= breakout_candle["low"] - hold_tolerance
         still_bullish = confirm_candle["close"] > confirm_candle["ema_fast"]
     else:
-        hold_confirmed = confirm_candle["high"] <= breakout_candle["high"] * 1.001
+        hold_confirmed = confirm_candle["high"] <= breakout_candle["high"] + hold_tolerance
         still_bullish = confirm_candle["close"] < confirm_candle["ema_fast"]
 
     if not (hold_confirmed and still_bullish):
         _log_evaluation({"result": "rejected", "reason": "breakout_did_not_hold", "trend": trend, "symbol": symbol})
         return None
 
-    # --- Build the trade: entry is the CONFIRMATION candle's close, not the breakout candle's ---
+    # --- Build the trade: entry is the CONFIRMATION candle's close ---
     entry_price = float(confirm_candle["close"])
-    atr = float(last_15m["atr"])
+    atr_15m = float(last_15m["atr"])
 
     if trend == "long":
         structure_stop = float(last_15m["swing_low"])
-        stop_loss = min(structure_stop, entry_price - atr * config.ATR_STOP_MULTIPLIER)
+        stop_loss = min(structure_stop, entry_price - atr_15m * config.ATR_STOP_MULTIPLIER)
         stop_distance_pct = (entry_price - stop_loss) / entry_price
-        take_profit_1 = entry_price * (1 + config.ROI_TARGET_MIN_PCT / config.LEVERAGE)
-        take_profit_2 = entry_price * (1 + config.ROI_TARGET_MAX_PCT / config.LEVERAGE)
-    else:
-        structure_stop = float(last_15m["swing_high"])
-        stop_loss = max(structure_stop, entry_price + atr * config.ATR_STOP_MULTIPLIER)
-        stop_distance_pct = (stop_loss - entry_price) / entry_price
-        take_profit_1 = entry_price * (1 - config.ROI_TARGET_MIN_PCT / config.LEVERAGE)
-        take_profit_2 = entry_price * (1 - config.ROI_TARGET_MAX_PCT / config.LEVERAGE)
-
-    target_distance_pct = abs(take_profit_1 - entry_price) / entry_price
-    risk_reward = target_distance_pct / stop_distance_pct if stop_distance_pct > 0 else 0
-
-    if risk_reward < config.MIN_RISK_REWARD_RATIO:
-        _log_evaluation({
-            "result": "rejected",
-            "reason": "risk_reward_below_minimum",
-            "risk_reward": round(risk_reward, 2),
-            "symbol": symbol,
-        })
-        return None
-
-    reasoning = (
-        f"{trend.upper()} {symbol} | 4h/1h trend aligned | 15m pullback to EMA{config.EMA_FAST} "
-        f"with RSI {last_15m['rsi']:.1f} | 5m breakout+hold confirmed with "
-        f"{breakout_candle['volume']/breakout_candle['volume_ma']:.2f}x avg volume | "
-        f"R:R {risk_reward:.2f}"
-    )
-
-    signal = Signal(
-        direction=trend,
-        entry_price=entry_price,
-        stop_loss=round(stop_loss, 2),
-        take_profit_1=round(take_profit_1, 2),
-        take_profit_2=round(take_profit_2, 2),
-        stop_distance_pct=round(stop_distance_pct, 5),
-        risk_reward_ratio=round(risk_reward, 2),
-        reasoning=reasoning,
-        timestamp=time.time(),
-    )
-
-    _log_evaluation({"result": "signal_taken", "symbol": symbol, **asdict(signal)})
-    return signal
+        take_profit_1 = entry_price * (1 + config.ROI_TARGET_MIN_PCT / config.L
