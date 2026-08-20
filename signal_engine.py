@@ -35,11 +35,11 @@ from indicators import add_indicators, get_trend_direction
 
 @dataclass
 class Signal:
-    direction: str          # 'long' or 'short'
+    direction: str
     entry_price: float
     stop_loss: float
-    take_profit_1: float    # 5% ROI target
-    take_profit_2: float    # 10% ROI target
+    take_profit_1: float
+    take_profit_2: float
     stop_distance_pct: float
     risk_reward_ratio: float
     reasoning: str
@@ -63,11 +63,6 @@ def evaluate_setup(
     df_5m: pd.DataFrame,
     symbol: str,
 ) -> Optional[Signal]:
-    """
-    Main entry point. Pass in raw OHLCV dataframes for each timeframe, plus the
-    symbol they belong to.
-    Returns a Signal if a valid setup exists, otherwise None (and logs why).
-    """
     df_4h = add_indicators(df_4h)
     df_1h = add_indicators(df_1h)
     df_15m = add_indicators(df_15m)
@@ -104,7 +99,6 @@ def evaluate_setup(
         _log_evaluation({"result": "rejected", "reason": "rsi_out_of_healthy_zone", "rsi": float(last_15m["rsi"]), "symbol": symbol})
         return None
 
-    # --- 5m trigger: breakout candle + ATR-scaled HOLD confirmation on the following candle ---
     if len(df_5m) < 3:
         _log_evaluation({"result": "rejected", "reason": "insufficient_5m_history", "symbol": symbol})
         return None
@@ -131,7 +125,6 @@ def evaluate_setup(
         _log_evaluation({"result": "rejected", "reason": "insufficient_volume_confirmation", "symbol": symbol})
         return None
 
-    # --- Hold confirmation: did the move survive the next candle, within ATR-scaled tolerance? ---
     hold_tolerance = breakout_candle["atr"] * config.HOLD_ATR_MULTIPLIER
 
     if trend == "long":
@@ -145,7 +138,6 @@ def evaluate_setup(
         _log_evaluation({"result": "rejected", "reason": "breakout_did_not_hold", "trend": trend, "symbol": symbol})
         return None
 
-    # --- Build the trade: entry is the CONFIRMATION candle's close ---
     entry_price = float(confirm_candle["close"])
     atr_15m = float(last_15m["atr"])
 
@@ -153,4 +145,45 @@ def evaluate_setup(
         structure_stop = float(last_15m["swing_low"])
         stop_loss = min(structure_stop, entry_price - atr_15m * config.ATR_STOP_MULTIPLIER)
         stop_distance_pct = (entry_price - stop_loss) / entry_price
-        take_profit_1 = entry_price * (1 + config.ROI_TARGET_MIN_PCT / config.L
+        take_profit_1 = entry_price * (1 + config.ROI_TARGET_MIN_PCT / config.LEVERAGE)
+        take_profit_2 = entry_price * (1 + config.ROI_TARGET_MAX_PCT / config.LEVERAGE)
+    else:
+        structure_stop = float(last_15m["swing_high"])
+        stop_loss = max(structure_stop, entry_price + atr_15m * config.ATR_STOP_MULTIPLIER)
+        stop_distance_pct = (stop_loss - entry_price) / entry_price
+        take_profit_1 = entry_price * (1 - config.ROI_TARGET_MIN_PCT / config.LEVERAGE)
+        take_profit_2 = entry_price * (1 - config.ROI_TARGET_MAX_PCT / config.LEVERAGE)
+
+    target_distance_pct = abs(take_profit_1 - entry_price) / entry_price
+    risk_reward = target_distance_pct / stop_distance_pct if stop_distance_pct > 0 else 0
+
+    if risk_reward < config.MIN_RISK_REWARD_RATIO:
+        _log_evaluation({
+            "result": "rejected",
+            "reason": "risk_reward_below_minimum",
+            "risk_reward": round(risk_reward, 2),
+            "symbol": symbol,
+        })
+        return None
+
+    reasoning = (
+        f"{trend.upper()} {symbol} | 4h/1h trend aligned | 15m pullback (ATR-scaled) to EMA{config.EMA_FAST} "
+        f"with RSI {last_15m['rsi']:.1f} | 5m breakout+hold confirmed (ATR-scaled) with "
+        f"{breakout_candle['volume']/breakout_candle['volume_ma']:.2f}x avg volume | "
+        f"R:R {risk_reward:.2f}"
+    )
+
+    signal = Signal(
+        direction=trend,
+        entry_price=entry_price,
+        stop_loss=round(stop_loss, 2),
+        take_profit_1=round(take_profit_1, 2),
+        take_profit_2=round(take_profit_2, 2),
+        stop_distance_pct=round(stop_distance_pct, 5),
+        risk_reward_ratio=round(risk_reward, 2),
+        reasoning=reasoning,
+        timestamp=time.time(),
+    )
+
+    _log_evaluation({"result": "signal_taken", "symbol": symbol, **asdict(signal)})
+    return signal
