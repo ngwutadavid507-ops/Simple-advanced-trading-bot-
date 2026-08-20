@@ -98,6 +98,10 @@ RSI_PULLBACK_ZONE = (40, 55)       # RSI range considered a healthy pullback (no
 
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 1.5          # stop-loss = structure level minus (ATR * multiplier), never tighter than this
+PULLBACK_ATR_MULTIPLIER = 0.5      # pullback zone = EMA20 +/- (ATR * this) - replaces the old fixed 0.3%,
+                                    # so a volatile coin gets a wider pullback tolerance than a calm one like gold
+HOLD_ATR_MULTIPLIER = 0.2          # how much give-back (as a fraction of ATR) is allowed on the hold-confirmation
+                                    # candle before we consider the breakout invalidated - replaces the old fixed 0.1%
 
 VOLUME_MA_PERIOD = 20
 VOLUME_CONFIRMATION_MULTIPLIER = 1.2   # entry candle volume must exceed X * 20-period volume average
