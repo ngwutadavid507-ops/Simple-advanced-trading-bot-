@@ -13,8 +13,11 @@ Setup note: generate demo trading API keys from Bybit's demo trading dashboard
 MULTI-PAIR: every function now takes a symbol parameter instead of a fixed one,
 since the bot scans across the top-volume pairs (like Phoenix did) rather than
 trading BTC exclusively. get_top_volume_pairs() is what drives pair selection -
-using 24h volume as the quality filter naturally excludes thin/illiquid/scam-
-adjacent tokens without needing a manual blocklist.
+using 24h volume as the quality filter, while also excluding Bybit's "TradFi
+Perpetuals" (stock and commodity contracts mixed into the same crypto listing,
+tagged with a 'symbolType' field that real crypto pairs don't have) - those
+require separate legal terms-acceptance our demo account can't satisfy, and
+aren't crypto anyway.
 
 IMPORTANT: stop-loss and take-profit are attached DIRECTLY on the entry order
 via Bybit's stopLoss/takeProfit params - NOT as separate follow-up orders.
@@ -43,18 +46,34 @@ def get_exchange():
 def get_top_volume_pairs(exchange) -> list:
     """
     Returns the top config.TOP_PAIRS_COUNT USDT perpetual pairs by 24h quote volume.
-    High volume is the quality filter here - same principle as Phoenix's multi-pair
-    scanning - it naturally excludes thin, illiquid, or scam-adjacent tokens without
-    needing a manually maintained blocklist.
+
+    Bybit mixes real crypto perpetuals together with "TradFi Perpetuals" - USDT-settled
+    contracts tracking stocks (AAPL, TSLA, etc.) and commodities (gold, silver, crude oil)
+    in the exact same linear/swap listing. These carry separate legal terms-acceptance
+    requirements our demo account can't satisfy programmatically, and they aren't crypto
+    anyway - they don't belong in this bot's universe at all.
+
+    Bybit's raw instrument data tags these with a 'symbolType' field (e.g. 'commodity')
+    that genuine crypto pairs don't have - so instead of maintaining a growing blocklist
+    of names as we discover them one at a time, we filter out anything carrying that
+    field entirely, in one shot.
     """
     tickers = exchange.fetch_tickers()
+    markets = exchange.markets
 
     candidates = []
     for symbol, ticker in tickers.items():
-        # Only linear USDT perpetuals (ccxt naming convention: "XXX/USDT:USDT")
         if not symbol.endswith("/USDT:USDT"):
             continue
         if any(marker in symbol for marker in config.EXCLUDE_SYMBOL_MARKERS):
+            continue
+        if symbol in config.EXCLUDE_SYMBOLS:
+            continue
+
+        market = markets.get(symbol, {}) or {}
+        raw_info = market.get("info", {}) or {}
+        if raw_info.get("symbolType"):
+            # Tagged as a TradFi product (stock, commodity, etc.) - not real crypto, skip.
             continue
 
         volume = ticker.get("quoteVolume") or 0
