@@ -9,8 +9,7 @@ import os
 # EXCHANGE
 # ============================================================
 EXCHANGE_ID = "bybit"
-USE_DEMO = True                    # Bybit has a real demo trading environment (not just testnet)
-                                    # Flip to False only after the evaluation period passes.
+USE_DEMO = True
 
 API_KEY = os.getenv("BYBIT_API_KEY", "")
 API_SECRET = os.getenv("BYBIT_API_SECRET", "")
@@ -18,43 +17,37 @@ API_SECRET = os.getenv("BYBIT_API_SECRET", "")
 # ============================================================
 # CAPITAL & RISK MANAGEMENT
 # ============================================================
-STARTING_CAPITAL_USDT = 50.0       # informational only - real balance is always pulled live from exchange
+STARTING_CAPITAL_USDT = 50.0
 
-LEVERAGE = 7                       # 5-10x range agreed on. 7x is the middle ground.
-RISK_PER_TRADE_PCT = 0.02          # max % of CURRENT capital lost if stop-loss is hit (2% = conservative default)
-MAX_MARGIN_PCT_OF_CAPITAL = 0.95    # cap on how much of capital can be used as margin on a single trade (1.0 = 100%)
+LEVERAGE = 7
+RISK_PER_TRADE_PCT = 0.02
+MAX_MARGIN_PCT_OF_CAPITAL = 0.95   # leave a 5% buffer - using literally 100% of "free" balance as margin
+                                    # was getting rejected by Bybit ("insufficient available balance")
 
-ROI_TARGET_MIN_PCT = 0.05          # 5% ROI on margin used = minimum take-profit target
-ROI_TARGET_MAX_PCT = 0.10          # 10% ROI on margin used = stretch take-profit target (TP2)
+ROI_TARGET_MIN_PCT = 0.05
+ROI_TARGET_MAX_PCT = 0.10
 
-MIN_BTC_ORDER_SIZE = 0.001         # Bybit's minimum tradeable BTC perpetual amount (other pairs have their own minimums,
-                                    # this is used as the reference for the sizing safety check)
+MIN_BTC_ORDER_SIZE = 0.001
 
-# Circuit breakers - these override everything else, including a "good" signal
-MAX_DAILY_LOSS_PCT = 0.15          # stop trading for the day if cumulative daily loss hits 15% of day-start capital
-MAX_CONSECUTIVE_LOSSES = 4         # stop trading for the day after N consecutive losing trades (regime-change guard)
+MAX_DAILY_LOSS_PCT = 0.15
+MAX_CONSECUTIVE_LOSSES = 4
 
 # ============================================================
 # COOLDOWN
 # ============================================================
-COOLDOWN_MINUTES_AFTER_WIN = 10    # minimum wait after a winning trade before next entry is considered
-COOLDOWN_MINUTES_AFTER_LOSS = 20   # longer cooldown after a loss - reduces revenge-trading risk, forces fresh analysis
-COOLDOWN_IS_FIXED = True           # NEVER make this adaptive to recent P&L - see notes in risk_manager.py
+COOLDOWN_MINUTES_AFTER_WIN = 10
+COOLDOWN_MINUTES_AFTER_LOSS = 20
+COOLDOWN_IS_FIXED = True
 
 # ============================================================
 # TRADE FREQUENCY GUARDRAILS
 # ============================================================
-MAX_TRADES_PER_DAY = 10            # hard ceiling to bound worst-case fee drag and force discipline
-
-MAX_POSITION_HOLD_HOURS = 3        # force-close a position if neither stop nor target hit within this window -
-                                    # the 5m/volume trigger that justified entry is time-bound; if the move
-                                    # hasn't happened by now, the original setup has effectively expired
+MAX_TRADES_PER_DAY = 10
+MAX_POSITION_HOLD_HOURS = 3
 
 # ============================================================
 # TRADING HOURS
 # ============================================================
-# Removed for the evaluation phase - the bot is fully unattended and automated,
-# so it scans and trades across all hours to gather data faster.
 TIMEZONE = "Africa/Lagos"
 TRADING_START_HOUR = 0
 TRADING_END_HOUR = 24
@@ -62,61 +55,70 @@ TRADING_END_HOUR = 24
 # ============================================================
 # MULTI-PAIR SCANNING
 # ============================================================
-# Instead of one fixed symbol, the bot dynamically pulls the top N pairs by 24h
-# volume each day. High volume naturally filters out thin, illiquid, or scam-
-# adjacent tokens without needing a manual blocklist.
-TOP_PAIRS_COUNT = 50                # how many top-volume pairs to scan each cycle
-PAIRS_REFRESH_HOURS = 24            # how often to refresh the top-pairs list
+TOP_PAIRS_COUNT = 50
+PAIRS_REFRESH_HOURS = 24
 
-EXCLUDE_SYMBOL_MARKERS = ["UP/", "DOWN/", "BULL/", "BEAR/", "3L/", "3S/"]  # leveraged tokens - avoid, different risk profile
-EXCLUDE_SYMBOLS = []                # manual fallback exclusion list - the symbolType filter in
-                                     # exchange_client.py catches TradFi products (stocks, commodities)
-                                     # automatically, but add specific symbols here if any slip through
+EXCLUDE_SYMBOL_MARKERS = ["UP/", "DOWN/", "BULL/", "BEAR/", "3L/", "3S/"]
+EXCLUDE_SYMBOLS = []
 
 # ============================================================
 # TIMEFRAMES
 # ============================================================
-TREND_TIMEFRAME_HIGH = "4h"        # macro trend direction
-TREND_TIMEFRAME_MID = "1h"         # momentum alignment with macro trend
-ENTRY_TIMEFRAME = "15m"            # structure / pullback level
-TRIGGER_TIMEFRAME = "5m"           # precise entry trigger
+TREND_TIMEFRAME_HIGH = "4h"
+TREND_TIMEFRAME_MID = "1h"
+ENTRY_TIMEFRAME = "15m"
+TRIGGER_TIMEFRAME = "5m"
 
-CANDLE_LOOKBACK = 200              # candles to fetch per timeframe for indicator calculation
+CANDLE_LOOKBACK = 200
 
 # ============================================================
 # SIGNAL / INDICATOR SETTINGS
 # ============================================================
 EMA_FAST = 20
 EMA_SLOW = 50
-EMA_MACRO = 100                    # shortened from 200 (~16 days of 4h history instead of ~33) -
-                                    # was the dominant bottleneck in signal scanning (no_aligned_trend
-                                    # was ~67% of all rejections); this makes trend detection responsive
-                                    # to medium-term trends instead of only very slow, long-forming ones
+EMA_MACRO = 100
 
 RSI_PERIOD = 14
-RSI_PULLBACK_ZONE = (40, 55)       # RSI range considered a healthy pullback (not overbought/oversold extreme)
+RSI_PULLBACK_ZONE = (40, 55)
 
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 1.5          # stop-loss = structure level minus (ATR * multiplier), never tighter than this
-PULLBACK_ATR_MULTIPLIER = 0.5      # pullback zone = EMA20 +/- (ATR * this) - replaces the old fixed 0.3%,
-                                    # so a volatile coin gets a wider pullback tolerance than a calm one like gold
-HOLD_ATR_MULTIPLIER = 0.2          # how much give-back (as a fraction of ATR) is allowed on the hold-confirmation
-                                    # candle before we consider the breakout invalidated - replaces the old fixed 0.1%
+ATR_STOP_MULTIPLIER = 1.5          # stop multiplier for NORMAL TREND (pullback) entries
+BREAKOUT_ATR_STOP_MULTIPLIER = 2.5 # wider stop multiplier for PARABOLIC (continuation) entries -
+                                    # chasing momentum is inherently riskier than entering on a pullback,
+                                    # so the stop needs more room to avoid being clipped by normal noise
 
 VOLUME_MA_PERIOD = 20
-VOLUME_CONFIRMATION_MULTIPLIER = 1.2   # entry candle volume must exceed X * 20-period volume average
+VOLUME_CONFIRMATION_MULTIPLIER = 1.2
 
-MIN_RISK_REWARD_RATIO = 2.0        # target distance must be at least 2x the stop distance to qualify as a signal
+MIN_RISK_REWARD_RATIO = 2.0
 
-# ============================================================
-# FEES (Bybit perpetual taker fee, adjust if your account tier differs)
-# ============================================================
-TAKER_FEE_PCT = 0.00055            # 0.055% per side, standard Bybit perpetual taker fee (verify against your account)
+PULLBACK_ATR_MULTIPLIER = 0.5
+HOLD_ATR_MULTIPLIER = 0.2
 
 # ============================================================
-# STATE STORAGE (Redis - reusing Phoenix conventions)
+# MARKET REGIME DETECTION
 # ============================================================
-REDIS_URL = os.getenv("REDIS_URL", "")   # Upstash Redis URL, same pattern as phoenix-bot-2
+# Four regimes, detected per pair per cycle using indicators already computed:
+#   - extreme_volatility: skip entirely, conditions too erratic to trust any entry logic
+#   - ranging: skip entirely, no directional edge without a fundamentally different (untested) approach
+#   - parabolic (strong trend): continuation entry, no pullback required, wider stop
+#   - normal_trend: existing pullback + hold-confirmation entry (unchanged)
+ATR_AVG_PERIOD = 50                     # baseline period for measuring "is current volatility unusual"
+EXTREME_VOLATILITY_RATIO = 2.0          # current ATR vs its own 50-period average - above this, skip entirely
+RANGING_EMA_BAND_ATR_MULTIPLIER = 0.5   # if EMA20/50/100 are bunched within this many ATRs of each other, skip (no real trend)
+STRONG_TREND_ATR_MULTIPLIER = 2.5       # price extended this many ATRs beyond EMA20 = parabolic regime
+PARABOLIC_RSI_EXHAUSTION_MAX = 85       # in parabolic mode, only reject if RSI is at extreme exhaustion (not the
+                                         # normal 65 pullback-zone ceiling, since parabolic moves run RSI hot by design)
+
+# ============================================================
+# FEES
+# ============================================================
+TAKER_FEE_PCT = 0.00055
+
+# ============================================================
+# STATE STORAGE (Redis)
+# ============================================================
+REDIS_URL = os.getenv("REDIS_URL", "")
 REDIS_KEY_PREFIX = "btcscalper"
 
 # ============================================================
@@ -128,7 +130,4 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 # ============================================================
 # EVALUATION MODE
 # ============================================================
-# Every signal decision - taken AND rejected - gets logged to Redis with full
-# reasoning (see state_manager.log_evaluation_event), so results are backed by
-# real data rather than anecdotal impressions.
 EVALUATION_MODE = True
