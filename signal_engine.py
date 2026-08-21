@@ -1,26 +1,19 @@
 """
 Signal engine - the only place that decides "is this a good setup".
 
-Design intent (per the agreed strategy):
-- Scan across the top-volume pairs (multi-pair, like Phoenix), not just BTC
-- Target small, high-probability moves (0.5-2% price move -> 5-10% ROI at 7x leverage)
-- Trend filter (4h/1h) + pullback entry (15m structure) + trigger confirmation (5m)
+MARKET REGIME AWARE: instead of one fixed entry style, the bot now classifies
+each pair's current regime (see indicators.classify_regime) and adapts:
+  - extreme_volatility / ranging / insufficient_data -> skip entirely, no
+    entry logic here is trustworthy in these conditions
+  - normal_trend -> pullback + hold-confirmation entry (original logic)
+  - parabolic -> continuation entry: no pullback required (there may not be
+    one), relaxed RSI (only rejects at true exhaustion, since parabolic moves
+    run RSI hot by design), wider ATR stop (chasing momentum is riskier than
+    entering on a pullback, needs more room to avoid normal noise)
 
-VOLATILITY-ADAPTIVE THRESHOLDS: pullback tolerance and hold-confirmation tolerance
-now scale with each pair's own ATR, instead of using fixed percentages. Fixed
-percentages structurally favored smooth, low-volatility assets (like XAUT) over
-genuinely volatile crypto pairs - a fixed 0.3% pullback zone is trivial for a calm
-asset to satisfy but can be blown through entirely by a volatile coin's normal
-noise, or never revisited at all. Scaling by ATR means a volatile pair gets a
-proportionally wider tolerance that matches its real movement, and a calm pair
-gets a tighter one - the filter adapts per-asset instead of applying one-size-fits-all
-thresholds calibrated for "average" volatility to everything.
-
-ENTRY TIMING: the 5m trigger requires a breakout candle (with volume confirmation)
-followed by a HOLD confirmation candle - we enter on the confirmation candle's
-close, one candle after the breakout, only if price hasn't given back more than
-HOLD_ATR_MULTIPLIER worth of ATR. This targets the late-entry/flatline pattern
-seen when entering on the breakout candle itself.
+Both regimes share the same 5m breakout + hold-confirmation trigger mechanism -
+the difference is only in what's required BEFORE that trigger (pullback or not)
+and how the stop is sized AFTER it.
 """
 
 import time
@@ -30,7 +23,7 @@ from typing import Optional
 import pandas as pd
 import config
 import state_manager
-from indicators import add_indicators, get_trend_direction
+from indicators import add_indicators, get_trend_direction, classify_regime
 
 
 @dataclass
@@ -75,30 +68,47 @@ def evaluate_setup(
 
     last_15m = df_15m.iloc[-1]
 
-    if pd.isna(last_15m["atr"]) or pd.isna(last_15m["ema_fast"]):
-        _log_evaluation({"result": "rejected", "reason": "insufficient_15m_history", "symbol": symbol})
+    regime = classify_regime(last_15m, trend)
+    if regime in ("extreme_volatility", "ranging", "insufficient_data"):
+        _log_evaluation({"result": "rejected", "reason": f"regime_{regime}", "trend": trend, "symbol": symbol})
         return None
 
-    pullback_tolerance = last_15m["atr"] * config.PULLBACK_ATR_MULTIPLIER
+    # --- Regime-specific pre-trigger checks ---
+    if regime == "normal_trend":
+        pullback_tolerance = last_15m["atr"] * config.PULLBACK_ATR_MULTIPLIER
+        if trend == "long":
+            pulled_back = last_15m["low"] <= last_15m["ema_fast"] + pullback_tolerance
+        else:
+            pulled_back = last_15m["high"] >= last_15m["ema_fast"] - pullback_tolerance
 
-    if trend == "long":
-        pulled_back = last_15m["low"] <= last_15m["ema_fast"] + pullback_tolerance
-    else:
-        pulled_back = last_15m["high"] >= last_15m["ema_fast"] - pullback_tolerance
+        if not pulled_back:
+            _log_evaluation({"result": "rejected", "reason": "price_extended_no_pullback", "trend": trend, "symbol": symbol})
+            return None
 
-    if not pulled_back:
-        _log_evaluation({"result": "rejected", "reason": "price_extended_no_pullback", "trend": trend, "symbol": symbol})
-        return None
+        if trend == "long":
+            rsi_ok = config.RSI_PULLBACK_ZONE[0] <= last_15m["rsi"] <= 65
+        else:
+            rsi_ok = 35 <= last_15m["rsi"] <= (100 - config.RSI_PULLBACK_ZONE[0])
 
-    if trend == "long":
-        rsi_ok = config.RSI_PULLBACK_ZONE[0] <= last_15m["rsi"] <= 65
-    else:
-        rsi_ok = 35 <= last_15m["rsi"] <= (100 - config.RSI_PULLBACK_ZONE[0])
+        if not rsi_ok:
+            _log_evaluation({"result": "rejected", "reason": "rsi_out_of_healthy_zone", "rsi": float(last_15m["rsi"]), "symbol": symbol})
+            return None
 
-    if not rsi_ok:
-        _log_evaluation({"result": "rejected", "reason": "rsi_out_of_healthy_zone", "rsi": float(last_15m["rsi"]), "symbol": symbol})
-        return None
+        stop_multiplier = config.ATR_STOP_MULTIPLIER
 
+    else:  # regime == "parabolic" - no pullback required, only reject at true RSI exhaustion
+        if trend == "long":
+            rsi_ok = last_15m["rsi"] < config.PARABOLIC_RSI_EXHAUSTION_MAX
+        else:
+            rsi_ok = last_15m["rsi"] > (100 - config.PARABOLIC_RSI_EXHAUSTION_MAX)
+
+        if not rsi_ok:
+            _log_evaluation({"result": "rejected", "reason": "rsi_exhausted_parabolic", "rsi": float(last_15m["rsi"]), "symbol": symbol})
+            return None
+
+        stop_multiplier = config.BREAKOUT_ATR_STOP_MULTIPLIER
+
+    # --- Shared 5m trigger: breakout candle + ATR-scaled hold confirmation ---
     if len(df_5m) < 3:
         _log_evaluation({"result": "rejected", "reason": "insufficient_5m_history", "symbol": symbol})
         return None
@@ -117,12 +127,12 @@ def evaluate_setup(
         breakout_fired = (breakout_candle["close"] < prior_candle["low"]) and (breakout_candle["close"] < breakout_candle["ema_fast"])
 
     if not breakout_fired:
-        _log_evaluation({"result": "rejected", "reason": "no_5m_breakout", "trend": trend, "symbol": symbol})
+        _log_evaluation({"result": "rejected", "reason": "no_5m_breakout", "trend": trend, "symbol": symbol, "regime": regime})
         return None
 
     breakout_volume_confirmed = breakout_candle["volume"] > (breakout_candle["volume_ma"] * config.VOLUME_CONFIRMATION_MULTIPLIER)
     if not breakout_volume_confirmed:
-        _log_evaluation({"result": "rejected", "reason": "insufficient_volume_confirmation", "symbol": symbol})
+        _log_evaluation({"result": "rejected", "reason": "insufficient_volume_confirmation", "symbol": symbol, "regime": regime})
         return None
 
     hold_tolerance = breakout_candle["atr"] * config.HOLD_ATR_MULTIPLIER
@@ -135,21 +145,22 @@ def evaluate_setup(
         still_bullish = confirm_candle["close"] < confirm_candle["ema_fast"]
 
     if not (hold_confirmed and still_bullish):
-        _log_evaluation({"result": "rejected", "reason": "breakout_did_not_hold", "trend": trend, "symbol": symbol})
+        _log_evaluation({"result": "rejected", "reason": "breakout_did_not_hold", "trend": trend, "symbol": symbol, "regime": regime})
         return None
 
+    # --- Build the trade ---
     entry_price = float(confirm_candle["close"])
     atr_15m = float(last_15m["atr"])
 
     if trend == "long":
         structure_stop = float(last_15m["swing_low"])
-        stop_loss = min(structure_stop, entry_price - atr_15m * config.ATR_STOP_MULTIPLIER)
+        stop_loss = min(structure_stop, entry_price - atr_15m * stop_multiplier)
         stop_distance_pct = (entry_price - stop_loss) / entry_price
         take_profit_1 = entry_price * (1 + config.ROI_TARGET_MIN_PCT / config.LEVERAGE)
         take_profit_2 = entry_price * (1 + config.ROI_TARGET_MAX_PCT / config.LEVERAGE)
     else:
         structure_stop = float(last_15m["swing_high"])
-        stop_loss = max(structure_stop, entry_price + atr_15m * config.ATR_STOP_MULTIPLIER)
+        stop_loss = max(structure_stop, entry_price + atr_15m * stop_multiplier)
         stop_distance_pct = (stop_loss - entry_price) / entry_price
         take_profit_1 = entry_price * (1 - config.ROI_TARGET_MIN_PCT / config.LEVERAGE)
         take_profit_2 = entry_price * (1 - config.ROI_TARGET_MAX_PCT / config.LEVERAGE)
@@ -163,12 +174,14 @@ def evaluate_setup(
             "reason": "risk_reward_below_minimum",
             "risk_reward": round(risk_reward, 2),
             "symbol": symbol,
+            "regime": regime,
         })
         return None
 
     reasoning = (
-        f"{trend.upper()} {symbol} | 4h/1h trend aligned | 15m pullback (ATR-scaled) to EMA{config.EMA_FAST} "
-        f"with RSI {last_15m['rsi']:.1f} | 5m breakout+hold confirmed (ATR-scaled) with "
+        f"{trend.upper()} {symbol} [{regime}] | 4h/1h trend aligned | "
+        f"{'15m pullback to EMA' + str(config.EMA_FAST) if regime == 'normal_trend' else 'continuation entry, no pullback required'} "
+        f"with RSI {last_15m['rsi']:.1f} | 5m breakout+hold confirmed with "
         f"{breakout_candle['volume']/breakout_candle['volume_ma']:.2f}x avg volume | "
         f"R:R {risk_reward:.2f}"
     )
@@ -185,5 +198,5 @@ def evaluate_setup(
         timestamp=time.time(),
     )
 
-    _log_evaluation({"result": "signal_taken", "symbol": symbol, **asdict(signal)})
+    _log_evaluation({"result": "signal_taken", "symbol": symbol, "regime": regime, **asdict(signal)})
     return signal
