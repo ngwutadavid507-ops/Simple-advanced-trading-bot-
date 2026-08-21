@@ -22,7 +22,7 @@ STARTING_CAPITAL_USDT = 50.0       # informational only - real balance is always
 
 LEVERAGE = 7                       # 5-10x range agreed on. 7x is the middle ground.
 RISK_PER_TRADE_PCT = 0.02          # max % of CURRENT capital lost if stop-loss is hit (2% = conservative default)
-MAX_MARGIN_PCT_OF_CAPITAL = 1.0    # cap on how much of capital can be used as margin on a single trade (1.0 = 100%)
+MAX_MARGIN_PCT_OF_CAPITAL = 0.95    # cap on how much of capital can be used as margin on a single trade (1.0 = 100%)
 
 ROI_TARGET_MIN_PCT = 0.05          # 5% ROI on margin used = minimum take-profit target
 ROI_TARGET_MAX_PCT = 0.10          # 10% ROI on margin used = stretch take-profit target (TP2)
