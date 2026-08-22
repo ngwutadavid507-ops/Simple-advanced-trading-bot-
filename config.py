@@ -88,7 +88,7 @@ BREAKOUT_ATR_STOP_MULTIPLIER = 2.5 # wider stop multiplier for PARABOLIC (contin
                                     # so the stop needs more room to avoid being clipped by normal noise
 
 VOLUME_MA_PERIOD = 20
-VOLUME_CONFIRMATION_MULTIPLIER = 1.2
+VOLUME_CONFIRMATION_MULTIPLIER = 1.0
 
 MIN_RISK_REWARD_RATIO = 2.0
 
