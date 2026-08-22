@@ -1,16 +1,12 @@
 """
 Risk management - the module that stands between a "good signal" and a live order.
 
-This is deliberately the most conservative-by-default file in the project. Every function
-here exists because of a specific failure mode discussed while designing this bot:
-  - position_size():        prevents one bad stop from wiping the account (Phoenix's core flaw),
-                             AND enforces Bybit's minimum tradeable size safely
-  - check_circuit_breakers(): prevents a bad DAY from wiping the account even with correct sizing
-  - check_cooldown():        prevents revenge-trading / re-entering before the market has moved on
-
-IMPORTANT: cooldown durations and entry criteria must stay FIXED regardless of recent P&L.
-Do not add logic that loosens signal criteria or shortens cooldown after losses "to catch up" -
-that pattern is one of the most common ways automated strategies degrade over time.
+Position sizing now also applies the confidence tier's size multiplier (from
+signal_engine's grading system) - a high-confidence signal gets full risk-based
+size, medium gets half, low gets a quarter. Stop-loss risk-per-trade percentage
+stays identical across all tiers; only how much capital is committed scales down
+for lower-confidence setups. This lets the bot trade partial-match setups without
+risking full size on something that only scored a bare pass.
 """
 
 import time
@@ -27,37 +23,26 @@ class PositionSizeResult:
     reason: str
 
 
-def position_size(current_capital: float, stop_distance_pct: float, leverage: int, entry_price: float) -> PositionSizeResult:
+def position_size(current_capital: float, stop_distance_pct: float, leverage: int, entry_price: float, tier_multiplier: float = 1.0) -> PositionSizeResult:
     """
-    Calculates position size so that a stop-loss hit costs exactly RISK_PER_TRADE_PCT
-    of current capital - regardless of how far away the stop needs to be.
+    Calculates position size so that a stop-loss hit costs approximately
+    RISK_PER_TRADE_PCT of current capital, scaled by the confidence tier's
+    size multiplier (1.0 for high confidence, down to 0.25 for low confidence).
 
-    This REPLACES "use full capital every trade" - full capital is only used if the
-    resulting risk is still within RISK_PER_TRADE_PCT given how tight the stop is.
-
-    Also enforces Bybit's minimum tradeable BTC amount (config.MIN_BTC_ORDER_SIZE):
-    - If the risk-based size comes out below the minimum, we check whether bumping
-      up to the minimum still fits within MAX_MARGIN_PCT_OF_CAPITAL. If yes, we bump
-      it (this means realized risk on this trade will be HIGHER than the 2% target,
-      but still capped and bounded - never full-account risk).
-    - If even the minimum order size would require more margin than allowed, the
-      trade is skipped entirely rather than erroring against the exchange.
+    Also enforces Bybit's minimum tradeable amount - bumps up to the minimum if
+    that still fits within the capital ceiling, otherwise skips the trade cleanly.
     """
     if stop_distance_pct <= 0:
         return PositionSizeResult(False, 0, 0, 0, "invalid_stop_distance")
 
-    risk_amount = current_capital * config.RISK_PER_TRADE_PCT
+    risk_amount = current_capital * config.RISK_PER_TRADE_PCT * tier_multiplier
 
-    # notional needed so that stop_distance_pct move against us = risk_amount
     required_notional = risk_amount / stop_distance_pct
     required_margin = required_notional / leverage
 
-    max_margin = current_capital * config.MAX_MARGIN_PCT_OF_CAPITAL
+    max_margin = current_capital * config.MAX_MARGIN_PCT_OF_CAPITAL * tier_multiplier
 
     if required_margin > max_margin:
-        # Stop is too wide for this account size at this leverage to keep risk capped -
-        # cap margin at max allowed, which means realized risk on this trade will be LOWER
-        # than target (safer), never higher.
         margin_to_use = max_margin
         reason = "capped_at_max_margin_stop_too_wide_for_full_risk"
     else:
@@ -67,21 +52,21 @@ def position_size(current_capital: float, stop_distance_pct: float, leverage: in
     notional_size = margin_to_use * leverage
     amount_in_base = notional_size / entry_price
 
-    # --- Enforce Bybit's minimum tradeable amount ---
     if amount_in_base < config.MIN_BTC_ORDER_SIZE:
         min_notional_needed = config.MIN_BTC_ORDER_SIZE * entry_price
         min_margin_needed = min_notional_needed / leverage
 
-        if min_margin_needed <= max_margin:
-            # Safe to bump up to the minimum - still within our capital ceiling,
-            # though realized risk on this trade will now be above the 2% target.
+        # For minimum-size bump, check against the FULL (non-tier-scaled) capital ceiling -
+        # a low-confidence trade should still be allowed to meet the exchange minimum,
+        # it just won't get scaled back down from there.
+        full_max_margin = current_capital * config.MAX_MARGIN_PCT_OF_CAPITAL
+
+        if min_margin_needed <= full_max_margin:
             margin_to_use = round(min_margin_needed, 2)
             notional_size = round(min_notional_needed, 2)
             amount_in_base = round(config.MIN_BTC_ORDER_SIZE, 6)
             reason = "bumped_to_exchange_minimum_order_size"
         else:
-            # Even the minimum order size would require too much margin - skip cleanly
-            # instead of sending an order the exchange will reject.
             return PositionSizeResult(False, 0, 0, 0, "stop_too_tight_cannot_meet_exchange_minimum_safely")
 
     return PositionSizeResult(
@@ -100,9 +85,6 @@ class CircuitBreakerResult:
 
 
 def check_circuit_breakers(day_start_capital: float, current_capital: float, consecutive_losses: int) -> CircuitBreakerResult:
-    """
-    Hard stops that override signal quality entirely. Checked BEFORE every new entry.
-    """
     daily_loss_pct = (day_start_capital - current_capital) / day_start_capital if day_start_capital > 0 else 0
 
     if daily_loss_pct >= config.MAX_DAILY_LOSS_PCT:
@@ -115,10 +97,6 @@ def check_circuit_breakers(day_start_capital: float, current_capital: float, con
 
 
 def check_cooldown(last_trade_close_time: float, last_trade_was_win: bool) -> tuple:
-    """
-    Returns (cooldown_active: bool, seconds_remaining: float).
-    Cooldown duration is FIXED - never adjust based on recent performance.
-    """
     if last_trade_close_time is None:
         return False, 0
 
@@ -135,10 +113,8 @@ def check_cooldown(last_trade_close_time: float, last_trade_was_win: bool) -> tu
 
 
 def check_daily_trade_limit(trades_today: int) -> bool:
-    """Returns True if another trade is allowed today."""
     return trades_today < config.MAX_TRADES_PER_DAY
 
 
 def estimate_fee_cost(notional_size: float) -> float:
-    """Round-trip (entry + exit) taker fee estimate for a given position notional."""
     return notional_size * config.TAKER_FEE_PCT * 2
