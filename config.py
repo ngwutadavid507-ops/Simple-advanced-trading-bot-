@@ -21,11 +21,7 @@ STARTING_CAPITAL_USDT = 50.0
 
 LEVERAGE = 7
 RISK_PER_TRADE_PCT = 0.02
-MAX_MARGIN_PCT_OF_CAPITAL = 0.95   # leave a 5% buffer - using literally 100% of "free" balance as margin
-                                    # was getting rejected by Bybit ("insufficient available balance")
-
-ROI_TARGET_MIN_PCT = 0.05
-ROI_TARGET_MAX_PCT = 0.10
+MAX_MARGIN_PCT_OF_CAPITAL = 0.95
 
 MIN_BTC_ORDER_SIZE = 0.001
 
@@ -82,33 +78,68 @@ RSI_PERIOD = 14
 RSI_PULLBACK_ZONE = (40, 55)
 
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 1.5          # stop multiplier for NORMAL TREND (pullback) entries
-BREAKOUT_ATR_STOP_MULTIPLIER = 2.5 # wider stop multiplier for PARABOLIC (continuation) entries -
-                                    # chasing momentum is inherently riskier than entering on a pullback,
-                                    # so the stop needs more room to avoid being clipped by normal noise
+ATR_STOP_MULTIPLIER = 1.5
+BREAKOUT_ATR_STOP_MULTIPLIER = 2.5
 
 VOLUME_MA_PERIOD = 20
 VOLUME_CONFIRMATION_MULTIPLIER = 1.0
 
-MIN_RISK_REWARD_RATIO = 2.0
-
 PULLBACK_ATR_MULTIPLIER = 0.5
 HOLD_ATR_MULTIPLIER = 0.2
 
+MIN_RISK_REWARD_RATIO = 1.5        # lowered slightly from 2.0 - low-confidence tiers target smaller ROI,
+                                    # so the ratio needed to still make sense is naturally a bit lower too
+
 # ============================================================
-# MARKET REGIME DETECTION
+# MARKET REGIME DETECTION (still HARD requirements - not scored)
 # ============================================================
-# Four regimes, detected per pair per cycle using indicators already computed:
-#   - extreme_volatility: skip entirely, conditions too erratic to trust any entry logic
-#   - ranging: skip entirely, no directional edge without a fundamentally different (untested) approach
-#   - parabolic (strong trend): continuation entry, no pullback required, wider stop
-#   - normal_trend: existing pullback + hold-confirmation entry (unchanged)
-ATR_AVG_PERIOD = 50                     # baseline period for measuring "is current volatility unusual"
-EXTREME_VOLATILITY_RATIO = 2.0          # current ATR vs its own 50-period average - above this, skip entirely
-RANGING_EMA_BAND_ATR_MULTIPLIER = 0.5   # if EMA20/50/100 are bunched within this many ATRs of each other, skip (no real trend)
-STRONG_TREND_ATR_MULTIPLIER = 2.5       # price extended this many ATRs beyond EMA20 = parabolic regime
-PARABOLIC_RSI_EXHAUSTION_MAX = 85       # in parabolic mode, only reject if RSI is at extreme exhaustion (not the
-                                         # normal 65 pullback-zone ceiling, since parabolic moves run RSI hot by design)
+# Trend alignment and "not ranging/not extreme volatility" remain non-negotiable -
+# these are the guardrails that keep this from becoming a coin flip. Everything
+# else below (volume, RSI quality, pullback tightness, hold strength) is SCORED
+# instead of gated, so a partial match can still trade at a lower confidence tier.
+ATR_AVG_PERIOD = 50
+EXTREME_VOLATILITY_RATIO = 2.0
+RANGING_EMA_BAND_ATR_MULTIPLIER = 0.5
+STRONG_TREND_ATR_MULTIPLIER = 2.5
+PARABOLIC_RSI_EXHAUSTION_MAX = 85
+
+# ============================================================
+# CONFIDENCE SCORING SYSTEM
+# ============================================================
+# Each factor below contributes points toward a total confidence score (0-100).
+# The total score determines which tier a signal falls into, which in turn sets
+# the ROI target and position size - NOT whether the trade happens at all.
+# Stop-loss risk management is identical across all tiers - only target/size scale.
+
+SCORE_WEIGHTS = {
+    "volume_strength": 25,      # how far above the volume MA the breakout candle is
+    "rsi_quality": 20,          # how close RSI is to the ideal middle of the healthy zone
+    "pullback_tightness": 20,   # (normal_trend only) how close the pullback was to EMA20
+    "hold_strength": 20,        # how cleanly the confirmation candle held (little to no give-back)
+    "risk_reward": 15,          # actual R:R achieved vs. the minimum required
+}
+
+# Tier cutoffs (score out of 100) and what each tier trades as
+CONFIDENCE_TIERS = {
+    "high": {
+        "min_score": 70,
+        "roi_target_min_pct": 0.05,
+        "roi_target_max_pct": 0.10,
+        "position_size_multiplier": 1.0,   # full risk-based size
+    },
+    "medium": {
+        "min_score": 45,
+        "roi_target_min_pct": 0.02,
+        "roi_target_max_pct": 0.03,
+        "position_size_multiplier": 0.5,   # half size
+    },
+    "low": {
+        "min_score": 0,                    # catches anything that passed the hard gates at all
+        "roi_target_min_pct": 0.005,
+        "roi_target_max_pct": 0.01,
+        "position_size_multiplier": 0.25,  # quarter size - even a tiny profit after fees counts as a win here
+    },
+}
 
 # ============================================================
 # FEES
