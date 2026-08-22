@@ -1,25 +1,15 @@
 """
-Main loop. Order of operations on every cycle, deliberately in this sequence:
+Main loop. Order of operations on every cycle:
 
-  1. Circuit breakers checked FIRST - can halt trading before anything else runs
-  2. Cooldown checked - blocks entries even if a signal would otherwise qualify
+  1. Circuit breakers checked FIRST
+  2. Cooldown checked
   3. Daily trade limit checked
-  4. Only then: refresh/reuse the top-volume pairs list, scan each pair in order,
-     trade the FIRST one that produces a qualifying signal (one position at a time)
-  5. If a signal passes ALL of the above: size the position, place the trade
-     WITH stop-loss/take-profit attached directly on the entry order
-  6. Monitor the open position (on its specific symbol) until it closes (stop/target
-     hit OR max hold time exceeded), record the result, log it to permanent monthly
-     history, start cooldown
-  7. Daily Telegram summary once per day
-  8. Monthly Telegram summary automatically on the 1st cycle of a new month -
-     compiles every trade from the completed month into one report
-
-MULTI-PAIR: while a position is open, the bot does NOT scan other pairs for new
-entries (one trade at a time) - but resumes scanning the full list once flat.
-
-Trading hours restriction removed - the bot is unattended and automated, so it
-evaluates signals across all pairs, around the clock.
+  4. Scan pairs, evaluate signal (now scored/graded - see signal_engine.py),
+     trade the FIRST one that clears the hard gates, sized according to its
+     confidence tier (high/medium/low -> full/half/quarter risk size)
+  5. Monitor the open position until it closes (stop/target hit OR max hold
+     time exceeded), record the result, log to permanent monthly history
+  6. Daily + automatic monthly Telegram summaries
 """
 
 import time
@@ -34,15 +24,10 @@ import state_manager
 import notifier
 
 
-POLL_INTERVAL_SECONDS = 60  # how often the main loop checks conditions when flat (no open position)
+POLL_INTERVAL_SECONDS = 60
 
 
 def get_pairs_to_scan(exchange) -> list:
-    """
-    Returns the current top-volume pairs list, using a cached version if it's
-    still fresh (per config.PAIRS_REFRESH_HOURS) to avoid re-fetching the full
-    market ticker list every single cycle.
-    """
     cached_pairs, _ = state_manager.get_cached_top_pairs()
     if cached_pairs:
         return cached_pairs
@@ -54,7 +39,6 @@ def get_pairs_to_scan(exchange) -> list:
 
 
 def maybe_send_daily_summary(current_capital):
-    """Sends the daily summary once per UTC day."""
     if not state_manager.summary_already_sent_today():
         stats = state_manager.get_day_stats()
         trades_today = state_manager.get_trades_today()
@@ -63,22 +47,15 @@ def maybe_send_daily_summary(current_capital):
 
 
 def maybe_send_monthly_summary(current_capital):
-    """
-    Detects a UTC month rollover and, exactly once, compiles the just-completed
-    month's full trade history into a Telegram summary. Also sets up tracking
-    for the new month (marker + starting capital).
-    """
     now_month = datetime.now(timezone.utc).strftime("%Y-%m")
     stored_month = state_manager.get_current_month_marker()
 
     if stored_month is None:
-        # First run ever - just establish the current month, nothing to summarize yet.
         state_manager.set_current_month_marker(now_month)
         state_manager.set_month_start_capital(current_capital)
         return
 
     if stored_month != now_month:
-        # Month has rolled over - summarize the COMPLETED month (stored_month), not the new one.
         trades = state_manager.get_trades_for_month(stored_month)
         wins = sum(1 for t in trades if t["was_win"])
         losses = sum(1 for t in trades if not t["was_win"])
@@ -87,7 +64,6 @@ def maybe_send_monthly_summary(current_capital):
 
         notifier.notify_monthly_summary(stored_month, trades, wins, losses, total_pnl, start_capital, current_capital)
 
-        # Set up fresh tracking for the new month
         state_manager.set_current_month_marker(now_month)
         state_manager.set_month_start_capital(current_capital)
 
@@ -140,13 +116,14 @@ def run_cycle(exchange):
         if signal is None:
             continue
 
-        sizing = risk_manager.position_size(current_capital, signal.stop_distance_pct, config.LEVERAGE, signal.entry_price)
+        tier_multiplier = config.CONFIDENCE_TIERS[signal.confidence_tier]["position_size_multiplier"]
+        sizing = risk_manager.position_size(current_capital, signal.stop_distance_pct, config.LEVERAGE, signal.entry_price, tier_multiplier)
         if not sizing.approved:
             print(f"[main] {symbol} signal found but sizing rejected: {sizing.reason}")
             continue
 
         fee_estimate = risk_manager.estimate_fee_cost(sizing.notional_size)
-        print(f"[main] Signal approved on {symbol}: {signal.reasoning}")
+        print(f"[main] Signal approved on {symbol} [{signal.confidence_tier}, score={signal.confidence_score}]: {signal.reasoning}")
         print(f"[main] Sizing: margin=${sizing.margin_to_use} notional=${sizing.notional_size} "
               f"amount={sizing.amount_in_base} ({sizing.reason}) est_fees=${fee_estimate:.3f}")
 
@@ -177,6 +154,8 @@ def execute_trade(exchange, symbol, signal, sizing):
         "stop_loss": signal.stop_loss,
         "take_profit_1": signal.take_profit_1,
         "take_profit_2": signal.take_profit_2,
+        "confidence_tier": signal.confidence_tier,
+        "confidence_score": signal.confidence_score,
         "amount_in_base": sizing.amount_in_base,
         "margin_used": sizing.margin_to_use,
         "notional_size": sizing.notional_size,
@@ -189,13 +168,6 @@ def execute_trade(exchange, symbol, signal, sizing):
 
 
 def manage_open_position(exchange, position):
-    """
-    Checks whether the open position has closed (stop or target hit) by checking
-    current exchange position state, on the position's specific symbol.
-
-    Also enforces MAX_POSITION_HOLD_HOURS: force-closes if held too long without
-    hitting stop or target.
-    """
     symbol = position["symbol"]
 
     try:
@@ -235,6 +207,7 @@ def manage_open_position(exchange, position):
         "direction": position["direction"],
         "was_win": was_win,
         "pnl": pnl,
+        "confidence_tier": position.get("confidence_tier", "unknown"),
         "closed_at": time.time(),
     })
     state_manager.clear_open_position()
@@ -248,13 +221,9 @@ def manage_open_position(exchange, position):
 
 
 def run_forever():
-    """
-    The actual bot loop, extracted so it can be run in a background thread
-    (see app.py) when hosted behind Render's free Web Service tier.
-    """
     exchange = exchange_client.get_exchange()
-    print(f"[main] BTC Scalper (multi-pair) starting. Demo mode: {config.USE_DEMO}")
-    notifier.send_message(f"🤖 Multi-pair scalper started (demo={config.USE_DEMO}, leverage={config.LEVERAGE}x)")
+    print(f"[main] BTC Scalper (multi-pair, graded confidence) starting. Demo mode: {config.USE_DEMO}")
+    notifier.send_message(f"🤖 Multi-pair scalper started (demo={config.USE_DEMO}, leverage={config.LEVERAGE}x, graded confidence enabled)")
 
     while True:
         try:
