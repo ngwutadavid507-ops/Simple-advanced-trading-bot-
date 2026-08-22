@@ -21,8 +21,10 @@ def send_message(text: str):
 
 
 def notify_trade_entry(signal, symbol, margin_used, notional_size):
+    tier_emoji = {"high": "🟢", "medium": "🟡", "low": "🟠"}.get(signal.confidence_tier, "")
     text = (
         f"🎯 *Entry: {signal.direction.upper()} {symbol}*\n"
+        f"{tier_emoji} Confidence: *{signal.confidence_tier.upper()}* (score: `{signal.confidence_score}`)\n"
         f"Entry: `{signal.entry_price}`\n"
         f"Stop: `{signal.stop_loss}` ({signal.stop_distance_pct:.2%})\n"
         f"TP1: `{signal.take_profit_1}`  TP2: `{signal.take_profit_2}`\n"
@@ -61,11 +63,6 @@ def notify_daily_summary(trades_today, wins, losses, day_pnl, ending_capital):
 
 
 def notify_monthly_summary(month_label, trades, wins, losses, total_pnl, start_capital, end_capital):
-    """
-    Full end-of-month breakdown: every closed trade for the month, aggregate
-    win rate, total PnL, and PnL as a percentage of what capital started the
-    month at - the actual "what did we achieve" number.
-    """
     win_rate = (wins / len(trades) * 100) if trades else 0
     pnl_pct = (total_pnl / start_capital * 100) if start_capital > 0 else 0
 
@@ -85,8 +82,6 @@ def notify_monthly_summary(month_label, trades, wins, losses, total_pnl, start_c
 
     text = "\n".join(lines)
 
-    # Telegram caps messages at 4096 characters - split into chunks if the trade
-    # log is long enough to exceed that.
     if len(text) <= 4000:
         send_message(text)
     else:
